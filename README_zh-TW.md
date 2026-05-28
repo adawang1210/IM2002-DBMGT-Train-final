@@ -1,3 +1,5 @@
+🌐 [English Version](README.md)
+
 # TransitFlow — 智慧鐵路助手
 
 > **課程起始專案** — 你的任務是建構驅動這個 AI 助手的資料庫。
