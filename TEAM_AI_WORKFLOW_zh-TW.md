@@ -1,3 +1,5 @@
+🌐 [English Version](TEAM_AI_WORKFLOW.md)
+
 # 團隊 AI 工作流程指南 — TransitFlow
 
 三位學生使用任何 AI 編碼助手（Claude Code、GitHub Copilot、Cursor、Gemini Code Assist 等）協作 TransitFlow 的實用指南。

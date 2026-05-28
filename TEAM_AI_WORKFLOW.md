@@ -1,3 +1,5 @@
+🌐 [繁體中文版](TEAM_AI_WORKFLOW_zh-TW.md)
+
 # Team AI Workflow Guide — TransitFlow
 
 A practical guide for three students working together on TransitFlow using any AI coding assistant (Claude Code, GitHub Copilot, Cursor, Gemini Code Assist, etc.).
