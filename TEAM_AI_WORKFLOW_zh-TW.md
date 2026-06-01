@@ -576,6 +576,83 @@ Schema：
 [一句話]
 ```
 
+### 範本 E：Seeder 函式實作（JSON → PostgreSQL）
+
+> **使用時機：** 實作 `skeleton/seed_postgres.py` 中的 `seed_*` 函式時。每個函式負責讀取一份 JSON、整理成 row tuple、用 `insert_many()` 批次插入。這個範本內含的設計約束是從實際跑通整套 seeder 萃取出來的,直接遵循能避開常見的對欄位錯、保留字衝突、polymorphic 約束失敗等問題。
+
+```
+我正在實作 TransitFlow 的 PostgreSQL seeder 函式之一。
+嚴格遵循這些規則:
+- 只讀取下方 schema 列出的欄位 — 不要發明欄位名稱
+- 一律用模組已提供的 insert_many(cur, table, columns, rows) 輔助函式
+  (它已內建 ON CONFLICT DO NOTHING, 不要自己寫 INSERT)
+- columns list 的順序必須與 row tuple 的元素順序一一對應
+- 對 JSON 中可能不存在或為 null 的欄位用 .get() 取值, 不要用 [..]
+- 完全匹配 stub 的函式簽名 — 函式名稱、參數一字不變
+- 函式最後 print 一行 "  <table_name>: {n} rows" 方便驗證
+
+[在此貼上 AI_SESSION_CONTEXT.md]
+
+要實作的 Stub:
+[貼上 seed_xxx() 函式骨架]
+
+對應的 schema:
+[貼上目標表的 CREATE TABLE 語句, 含所有 CHECK / FK / 索引]
+
+來源 JSON 範例 (1-2 筆):
+[貼上 train-mock-data/xxx.json 的前幾筆紀錄]
+
+請依下方檢查清單處理特殊情況。每一條若不適用就跳過, 但不要省略思考。
+
+(1) 巢狀結構: JSON 若有 list of list (例如 schedule.stops_in_order /
+    seat_layout.coaches[].seats[]), 用雙層 for 攤平成 row 並填 stop_order /
+    seat_id 等子表 PK。
+(2) Parent + 子表: schedule 類資料先插 parent table, 再用 enumerate() 產
+    stop_order 插子表; 子表的 schedule_id 必須先在 parent 存在 (FK)。
+(3) 巢狀 dict 攤平: 若 schema 把 JSON 的巢狀 dict (例如 fare_classes.standard.base_fare_usd)
+    攤平成多個 column, 函式內也要攤平, 不要保留 dict。
+(4) SQL 保留字: 若 schema 把保留字改名 (例如 row→row_number, column→column_letter),
+    columns list 用 schema 的新名, 但從 JSON 取值仍用原 key。
+(5) Polymorphic / CHECK 約束: 若 schema 有衍生欄位 (例如 transaction_type),
+    從另一個欄位推導 (例如 booking_id 前綴 BK→NR, MT→Metro),
+    確保符合 CHECK 約束, 不要硬編 None。
+(6) NULL FK / 自參照: 若欄位是自參照 FK (例如 day_pass_ref) 或 JSON 中該欄
+    為 null, .get() 取出 None 即可, psycopg2 會正確轉 SQL NULL。
+(7) Idempotent: 不要在函式內 commit 或 rollback (main() 已處理),
+    也不要做 DELETE — 重跑時讓 ON CONFLICT 自動跳過。
+
+實作完成後請對自己回答:
+- columns list 的每個欄位都在 schema 裡嗎? (沒拼錯/沒發明)
+- columns list 順序與 row tuple 順序完全一致嗎?
+- 對 JSON 中可能 missing 的 key, 是否一律用 .get()?
+- 是否處理了上述 7 點中所有適用的情況?
+```
+
+**驗證 (寫完後跑這幾條):**
+
+```bash
+# 第一次跑: 應看到每張表的 row 數
+.venv/bin/python skeleton/seed_postgres.py
+
+# 第二次跑: 所有表應顯示 0 rows (證明 ON CONFLICT 有效, idempotent)
+.venv/bin/python skeleton/seed_postgres.py
+
+# 進 DB 對 row 數
+docker compose exec -T postgres psql -U transitflow -d transitflow \
+    -c "SELECT 'metro_stations', COUNT(*) FROM metro_stations
+        UNION ALL SELECT 'national_rail_seats', COUNT(*) FROM national_rail_seats
+        ORDER BY 1;"
+```
+
+**常見錯誤對應:**
+
+| 錯誤訊息 | 原因 | 解法 |
+|---|---|---|
+| `column "..." of relation "..." does not exist` | columns list 與 schema 不符 | 對照 schema.sql 校正欄位名 |
+| `null value in column "..." violates not-null constraint` | JSON 該欄位缺失或為 null, 但 schema 設了 NOT NULL | schema 改可空,或在 seeder 提供預設值 |
+| `insert or update ... violates foreign key constraint` | 子表先於 parent 插入, 或 station_id 不存在 | 確認 main() 的呼叫順序符合相依關係 |
+| `new row ... violates check constraint "chk_..."` | 衍生欄位推導錯 (例如 transaction_type) | 對照 schema 的 CHECK 條件重推 |
+
 ### 如何分享有效的提示詞
 
 當你找到一個產生好輸出的提示詞時，將它加到 `AI_SESSION_CONTEXT.md` 的**提示詞日誌**區段。你的隊友可以重用它，而不用花時間寫自己的。
