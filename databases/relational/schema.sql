@@ -7,7 +7,7 @@
 --    2. Vector      → policy documents for RAG (provided — do not modify)
 --
 --  Schema 整合三份資料字典後的最終決議
---  (詳見 train-mock-data/DATA_DICTIONARY/SCHEMA_COMPARISON.md)
+--  (詳見 train-mock-data/DATA_DICTIONARY_RELATIONAL/SCHEMA_COMPARISON_RELATIONAL.md)
 --
 --  原則：
 --    1. 欄位完整度為先 → 兩家都不完整時直接從原始 JSON 取
