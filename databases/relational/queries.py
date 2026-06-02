@@ -83,6 +83,11 @@ def query_national_rail_availability(
         destination_id:  e.g. "NR05"
         travel_date:     e.g. "2025-06-01" — used to count bookings; omit for general info
     """
+    # Defensive: LLM sometimes passes the string 'null' / 'None' / '' instead of None.
+    # 在進 SQL 前統一正規化, 避免 psycopg2 把字串 'null' 當成日期值送進 DB 噴 InvalidDatetimeFormat。
+    if isinstance(travel_date, str) and travel_date.strip().lower() in ("", "null", "none"):
+        travel_date = None
+
     # 為什麼用這個 SQL: 用 stops 子表自 join (alias o, d) 同時抓 origin / destination 兩站,
     # 用 o.stop_order < d.stop_order 確保方向正確; 兩站都要 is_passed_through=false 才算有效停靠;
     # 每張 schedule 的當日訂位數用 LEFT JOIN + 子查詢預先彙總 (避免 GROUP BY 複雜化);
