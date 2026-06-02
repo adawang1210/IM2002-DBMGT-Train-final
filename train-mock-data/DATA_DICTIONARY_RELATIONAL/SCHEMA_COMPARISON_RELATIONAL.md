@@ -2,9 +2,9 @@
 
 本文比較三組來源的關聯式 schema 設計：
 
-- **Xan**（DATA_DICTIONARY_1.md）
-- **張恩家**（DATA_DICTIONARY_2.md）
-- **陳楷**（DATA_DICTIONARY_3）
+- **Xan**（DATA_DICTIONARY_RELATIONAL_1.md）
+- **張恩家**（DATA_DICTIONARY_RELATIONAL_2.md）
+- **陳楷**（DATA_DICTIONARY_RELATIONAL_3.md）
 
 > **原則：** 不是一定要從兩位組員的設計裡二擇一。原始 JSON 結構本身已經很乾淨，三位都不夠完整時，直接給出新設計才是負責任的整合。
 

@@ -47,7 +47,7 @@ TransitFlow is a Python-based AI chat assistant for a fictional transit operator
 
 整合三份資料字典的最終決議。三項原則：(1) 欄位完整度為先,兩家都不完整時直接從原始 JSON 取；(2) 採用 Xan 的架構亮點 — polymorphic `transaction_type`、子表化 stops、`day_pass_ref` 自參照；(3) 加上 CHECK 約束、複合索引、避開 SQL 保留字。`station_adjacent` 留給 Neo4j。
 
-詳細比較見 `train-mock-data/DATA_DICTIONARY/SCHEMA_COMPARISON.md`,實際 DDL 在 `databases/relational/schema.sql`。
+詳細比較見 `train-mock-data/DATA_DICTIONARY_RELATIONAL/SCHEMA_COMPARISON_RELATIONAL.md`,實際 DDL 在 `databases/relational/schema.sql`。
 
 ```sql
 -- USERS
@@ -278,7 +278,7 @@ def query_station_connections(station_id: str) -> list[dict]: ...
 - **Decision:** `users` 採張恩家版本(完整 10 欄)。**Why:** Xan 漏掉 `secret_question`/`secret_answer`/`registered_at`/`is_active`,會讓 `register_user()`、`get_user_secret_question()`、`verify_secret_answer()` 無法實作。
 - **Decision:** `payments` / `feedback` 用 polymorphic `transaction_type` 欄位 + CHECK 約束保證 `booking_id` 前綴 (BK / MT) 與類型一致。**Why:** 採 Xan 的多型概念但保留原始 `booking_id` 命名,seed 不需做欄位映射,還能用 CHECK 防止髒資料。
 - **Decision:** stations 的 `lines` / `interchange_*_lines` 用 `TEXT[]` 直接存陣列,不拆 `station_lines` 子表。**Why:** 30 個車站、6 條線的規模拆子表是過度設計,PostgreSQL 原生陣列查詢同樣方便。
-- **Decision:** **不**建立 `station_adjacent` 表。**Why:** 相鄰站關係是 Neo4j 的職責,DATA_DICTIONARY_3.md 明確標注此欄位不入 PostgreSQL,張恩家方案在這裡是設計錯誤。
+- **Decision:** **不**建立 `station_adjacent` 表。**Why:** 相鄰站關係是 Neo4j 的職責,DATA_DICTIONARY_RELATIONAL_3.md 明確標注此欄位不入 PostgreSQL,張恩家方案在這裡是設計錯誤。
 - **Decision:** 兩個 stations 表互為外鍵不設嚴格 FK 約束。**Why:** 互相參照會出現雞生蛋問題,seed 時無論先載哪邊都會違反約束。
 - **Decision:** 國鐵票價攤平成 4 個欄位 (`fare_standard_base_usd` 等),不另開 `fare_classes` 子表。**Why:** 只有 standard / first 兩種等級且固定,攤平比子表簡潔且 query 不需 JOIN。
 - **Decision:** `national_rail_schedule_stops` / `metro_schedule_stops` 拆子表 + `is_passed_through` BOOLEAN 標記快車經過不停的站。**Why:** 採 Xan 的子表設計,順序查詢比 JSONB 容易;同時把 `passed_through_stations` 整合進來,不需另開第三張子表。
