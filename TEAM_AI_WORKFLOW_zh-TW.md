@@ -653,6 +653,118 @@ docker compose exec -T postgres psql -U transitflow -d transitflow \
 | `insert or update ... violates foreign key constraint` | 子表先於 parent 插入, 或 station_id 不存在 | 確認 main() 的呼叫順序符合相依關係 |
 | `new row ... violates check constraint "chk_..."` | 衍生欄位推導錯 (例如 transaction_type) | 對照 schema 的 CHECK 條件重推 |
 
+### 範本 F：圖形資料庫 (Neo4j) Schema 設計
+
+> **使用時機：** 為 `databases/graph/queries.py` 的 6 個 `query_` 函式設計 Neo4j schema 字典時。這個範本內建硬性約束 (只用 station JSON、必須支援所有 6 個查詢) 與 4 個必答的設計問題,確保產出的 schema 文件可以直接進入 PR review,而不只是天馬行空的腦力激盪。
+>
+> **產出檔案位置:** `train-mock-data/DATA_DICTIONARY_GRAPH/DATA_DICTIONARY_GRAPH_<n>.md` (團隊每位成員產一份, 工作坊時三份對照)。
+
+```
+================================================================
+TASK: 設計 TransitFlow 圖形資料庫 (Neo4j) Schema
+================================================================
+
+我要為 TransitFlow 設計圖形資料庫的 schema 字典提案。
+資料來源只用 metro_stations.json + national_rail_stations.json 兩個檔案。
+
+【硬性約束】
+
+1. 只能用兩個 station JSON 設計 schema, 不要把 schedules / bookings 等
+   資料拉進 graph (那些是 PostgreSQL 的職責)。
+
+2. Schema 必須能支援 databases/graph/queries.py 已定義的 6 個查詢函式:
+   - query_shortest_route       (Dijkstra by travel_time_min)
+   - query_cheapest_route       (Dijkstra by 票價)
+   - query_alternative_routes   (繞過某站的其他路徑)
+   - query_interchange_path     (跨網路 metro <-> NR 轉乘)
+   - query_delay_ripple         (N hops 延誤連帶影響)
+   - query_station_connections  (列出某站的所有直連)
+
+3. 必須回答下面 4 個設計問題, 每題寫出選擇 + 理由:
+
+   Q1: 節點標籤怎麼分?
+       A. 兩個分離 label: MetroStation / NationalRailStation
+       B. 統一 Station + property network
+       C. 多 label 並用 Station:MetroStation
+
+   Q2: 同網路相鄰邊用單一型還是分網路?
+       A. 統一 [:CONNECTS_TO] + property 區分 network
+       B. 分 [:METRO_LINK] / [:RAIL_LINK]
+
+   Q3: 跨網路轉乘關係的方向?
+       A. 雙向各建一條
+       B. 單向 + 查詢時用無向
+
+   Q4: INTERCHANGE 的 travel_time_min (JSON 沒提供) 怎麼處理?
+       A. 預設 5 分鐘
+       B. 留空 + 註記未來補充
+
+4. 屬性表必須列出: 名稱 / 資料型別 / 是否必填 / 範例值 / 來源 JSON 欄位。
+
+5. 結尾附 Cypher 雛形, 包含節點建立、同網路邊、跨網路邊三段。
+
+【貼上的資料】
+
+metro_stations.json 第一筆紀錄:
+[貼入完整 JSON]
+
+national_rail_stations.json 第一筆紀錄:
+[貼入完整 JSON]
+
+【統計參考】
+- metro_stations: 20 個節點, 42 條相鄰邊
+- national_rail_stations: 10 個節點, 18 條相鄰邊
+- 跨網路轉乘車站對: 3 對
+
+【輸出格式】
+
+直接寫一份 markdown 到
+/path/to/train-mock-data/DATA_DICTIONARY_GRAPH/DATA_DICTIONARY_GRAPH_<n>.md:
+
+# TransitFlow 圖形資料庫 (Neo4j) Schema 設計
+
+## 1. 節點設計 (Nodes)
+[逐個 Label 列出 + 屬性表]
+
+## 2. 關係設計 (Relationships)
+[逐個 Type 列出 + 屬性表]
+
+## 3. 設計決策
+### Q1: 節點標籤
+- 選擇: ...
+- 理由: ...
+### Q2 ~ Q4: ... (同上格式)
+
+## 4. Cypher 雛形
+```cypher
+// 節點 / 同網路邊 / 跨網路邊 各一段
+```
+```
+
+**用法 (團隊工作坊):**
+
+1. 三位隊友各自帶這份範本去問自己的 AI, 各產一份 `DATA_DICTIONARY_GRAPH_1.md` / `_2.md` / `_3.md`。
+2. 比較三份在 Q1–Q4 上的選擇差異 — 通常會分別出現分離模型 vs 統一模型 vs 多 label 折衷。
+3. 看 6 個 `query_` 的 Cypher 雛形哪份寫起來最短、最不容易出錯,以此作為決策依據。
+4. 團隊投票決定一份, 將最終決定的 schema 寫進 `AI_SESSION_CONTEXT.md` 的 **Graph Schema** 區段, 後續 `seed_neo4j.py` 與 `query_*` 都依此 schema 實作。
+
+**驗證 (寫完後對自己回答):**
+
+- [ ] 屬性表是否列齊「名稱 / 型別 / 必填 / 範例值 / 來源 JSON 欄位」5 欄?
+- [ ] 6 個 `query_` 函式是否都能用提案的 schema 寫出來? (尤其 `query_interchange_path` 跨網路、`query_delay_ripple` 不分網路 N hops)
+- [ ] Cypher 雛形的關係方向是否符合 Q3 的選擇? (雙向就要建兩條 `MERGE`)
+- [ ] `INTERCHANGE` 邊有 `travel_time_min` 嗎? (NULL 會讓 Dijkstra 失準)
+- [ ] 是否避免把 `adjacent_stations` 以外的資料 (例如 schedules / fares) 帶進 graph?
+
+**常見偏離 (PR review 抓這幾點):**
+
+| 症狀 | 原因 | 修正 |
+|---|---|---|
+| AI 在節點上加了 `schedules` 或 `bookings` 欄位 | 沒嚴守「只用兩個 station JSON」 | 把那些屬性砍掉, 留給 PostgreSQL |
+| 跨網路邊只建單向, 但 Cypher 樣板用 `-[:INTERCHANGE]->` | Q3 選 A 卻只寫一條 `MERGE` | 補第二條 `MERGE` 或改 Q3 為 B |
+| `INTERCHANGE` 沒有 `travel_time_min` | Q4 選了 B 但忘了 Dijkstra 不容許 NULL | 改回 A 給預設值 (例如 5) |
+| 同時用 `MetroStation` label 又有 `network: "metro"` property | Q1 選 A 卻又抄 B 的屬性 | 二擇一,保持一致 |
+
 ### 如何分享有效的提示詞
 
 當你找到一個產生好輸出的提示詞時，將它加到 `AI_SESSION_CONTEXT.md` 的**提示詞日誌**區段。你的隊友可以重用它，而不用花時間寫自己的。
