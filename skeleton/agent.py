@@ -384,11 +384,14 @@ def _execute_tool(
         elif tool_name == "search_policy":
             embedding = llm.embed(params["query"])
             docs = query_policy_vector_search(embedding)
+            # 不截 content: 政策文件本身不大 (RF005 約 1.3k 字), 截到 800 會把
+            # compensation_rules 切半, LLM 看不到 30-59 min / 60-119 min / >=120 min
+            # 的全部分級, 進而誤回 "no compensation". 直接給完整 content 換取正確性。
             result = [
                 {
                     "title":      d["title"],
                     "category":   d["category"],
-                    "content":    d["content"][:800],
+                    "content":    d["content"],
                     "similarity": round(d["similarity"], 3),
                 }
                 for d in docs
