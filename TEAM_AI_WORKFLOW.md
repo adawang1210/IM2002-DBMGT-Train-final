@@ -577,6 +577,332 @@ What I expected it to do:
 [one sentence]
 ```
 
+### Template E: Seeder Function Implementation (JSON → PostgreSQL)
+
+> **When to use:** Implementing the `seed_*` functions in `skeleton/seed_postgres.py`. Each function reads a JSON file, shapes it into row tuples, and bulk-inserts via `insert_many()`. The constraints in this template are distilled from a working end-to-end seeder run — following them sidesteps the usual pitfalls around column mismatches, reserved-word collisions, and polymorphic check constraints.
+
+```
+I'm implementing one of the TransitFlow PostgreSQL seeder functions.
+Follow these rules strictly:
+- Read only the columns listed in the schema below — do not invent column names
+- Always use the insert_many(cur, table, columns, rows) helper provided in the module
+  (it already includes ON CONFLICT DO NOTHING — do not write your own INSERT)
+- The order of the columns list must match the order of elements in each row tuple, one-to-one
+- Use .get() (not [..]) for any JSON field that may be missing or null
+- Match the stub's signature exactly — function name and parameters unchanged
+- End the function with `print("  <table_name>: {n} rows")` for verification
+
+[paste AI_SESSION_CONTEXT.md here]
+
+Stub to implement:
+[paste the seed_xxx() function skeleton]
+
+Target schema:
+[paste the CREATE TABLE statement, including all CHECK / FK / index clauses]
+
+Source JSON sample (1–2 records):
+[paste the first few records from train-mock-data/xxx.json]
+
+Walk through the checklist below for special cases. Skip an item only if it doesn't apply,
+but don't skip the thinking.
+
+(1) Nested structures: If the JSON contains a list of lists (e.g. schedule.stops_in_order /
+    seat_layout.coaches[].seats[]), use a double-for to flatten into rows and fill child-
+    table PKs like stop_order or seat_id.
+(2) Parent + child tables: For schedule-style data, insert into the parent table first, then
+    use enumerate() to generate stop_order for the child table; the child's schedule_id must
+    already exist in the parent (FK).
+(3) Flatten nested dicts: If the schema flattens a JSON nested dict (e.g. fare_classes.standard.base_fare_usd)
+    into separate columns, flatten it in the function too — don't keep the dict.
+(4) SQL reserved words: If the schema renames reserved words (e.g. row→row_number,
+    column→column_letter), use the renamed name in the columns list, but still read from
+    the JSON using the original key.
+(5) Polymorphic / CHECK constraints: If the schema has a derived column (e.g. transaction_type),
+    derive it from another column (e.g. booking_id prefix BK→NR, MT→Metro) so it satisfies the
+    CHECK constraint — do not hard-code None.
+(6) NULL FK / self-references: For self-referential FKs (e.g. day_pass_ref) or fields that are
+    null in the JSON, .get() returns None and psycopg2 will correctly translate it to SQL NULL.
+(7) Idempotent: Do not commit or rollback inside the function (main() handles that), and do
+    not perform DELETEs — let ON CONFLICT skip on re-run.
+
+After implementing, ask yourself:
+- Is every entry in the columns list present in the schema? (no typos, no inventions)
+- Do the columns list and row tuple line up element-for-element?
+- Is .get() used for every JSON key that might be missing?
+- Did you handle every applicable item from the 7 above?
+```
+
+**Verification (run these after implementing):**
+
+```bash
+# First run: should show row counts per table
+.venv/bin/python skeleton/seed_postgres.py
+
+# Second run: every table should show 0 rows (proves ON CONFLICT works, idempotent)
+.venv/bin/python skeleton/seed_postgres.py
+
+# Cross-check row counts inside the DB
+docker compose exec -T postgres psql -U transitflow -d transitflow \
+    -c "SELECT 'metro_stations', COUNT(*) FROM metro_stations
+        UNION ALL SELECT 'national_rail_seats', COUNT(*) FROM national_rail_seats
+        ORDER BY 1;"
+```
+
+**Common errors and fixes:**
+
+| Error message | Cause | Fix |
+|---|---|---|
+| `column "..." of relation "..." does not exist` | columns list doesn't match the schema | Cross-check against schema.sql and correct the column name |
+| `null value in column "..." violates not-null constraint` | The JSON field is missing/null but the schema has NOT NULL | Make the schema column nullable, or supply a default in the seeder |
+| `insert or update ... violates foreign key constraint` | Child table inserted before parent, or station_id doesn't exist | Verify the call order in main() respects dependencies |
+| `new row ... violates check constraint "chk_..."` | Derived column (e.g. transaction_type) inferred incorrectly | Re-derive against the schema's CHECK condition |
+
+### Template F: Graph Database (Neo4j) Schema Design
+
+> **When to use:** Designing the Neo4j schema dictionary for the 6 `query_` functions in `databases/graph/queries.py`. This template builds in hard constraints (use only the station JSON, must support all 6 queries) and 4 mandatory design questions, so the resulting schema doc is review-ready instead of a brainstorm dump.
+>
+> **Output file location:** `train-mock-data/DATA_DICTIONARY_GRAPH/DATA_DICTIONARY_GRAPH_<n>.md` (each teammate produces one — three to compare during the workshop).
+
+```
+================================================================
+TASK: Design the TransitFlow Graph Database (Neo4j) Schema
+================================================================
+
+I'm proposing a graph database schema dictionary for TransitFlow.
+The data sources are restricted to two files: metro_stations.json + national_rail_stations.json.
+
+[Hard Constraints]
+
+1. Use only the two station JSON files to design the schema. Do not pull in
+   schedules / bookings or other data (those belong in PostgreSQL).
+
+2. The schema must support all 6 query functions already defined in
+   databases/graph/queries.py:
+   - query_shortest_route       (Dijkstra by travel_time_min)
+   - query_cheapest_route       (Dijkstra by fare)
+   - query_alternative_routes   (paths that avoid a given station)
+   - query_interchange_path     (cross-network metro <-> NR transfers)
+   - query_delay_ripple         (N-hop delay propagation)
+   - query_station_connections  (list direct connections from a station)
+
+3. Answer the 4 design questions below — each with a choice + rationale:
+
+   Q1: How should node labels be split?
+       A. Two separate labels: MetroStation / NationalRailStation
+       B. Unified Station + a `network` property
+       C. Multiple labels: Station:MetroStation
+
+   Q2: Same-network adjacency edges — single type or per-network?
+       A. Unified [:CONNECTS_TO] with a `network` property
+       B. Separate [:METRO_LINK] / [:RAIL_LINK]
+
+   Q3: Direction of cross-network interchange relationships?
+       A. Build two directed edges (one per direction)
+       B. One direction only + use undirected match in queries
+
+   Q4: How to handle the INTERCHANGE travel_time_min (not in the JSON)?
+       A. Default to 5 minutes
+       B. Leave empty + flag as a future TODO
+
+4. The property tables must list: name / data type / required? / example value / source JSON field.
+
+5. End with a Cypher skeleton covering three sections: node creation,
+   same-network edges, cross-network edges.
+
+[Data to Paste]
+
+First record from metro_stations.json:
+[paste the full JSON]
+
+First record from national_rail_stations.json:
+[paste the full JSON]
+
+[Reference Stats]
+- metro_stations: 20 nodes, 42 adjacency edges
+- national_rail_stations: 10 nodes, 18 adjacency edges
+- Cross-network interchange station pairs: 3
+
+[Output Format]
+
+Write the markdown directly to
+/path/to/train-mock-data/DATA_DICTIONARY_GRAPH/DATA_DICTIONARY_GRAPH_<n>.md:
+
+# TransitFlow Graph Database (Neo4j) Schema Design
+
+## 1. Nodes
+[List each label with its property table]
+
+## 2. Relationships
+[List each type with its property table]
+
+## 3. Design Decisions
+### Q1: Node labels
+- Choice: ...
+- Rationale: ...
+### Q2 ~ Q4: ... (same format)
+
+## 4. Cypher Skeleton
+```cypher
+// node creation / same-network edges / cross-network edges — one block each
+```
+```
+
+**Workshop usage (team):**
+
+1. Each of the three teammates feeds this template to their own AI and produces one of `DATA_DICTIONARY_GRAPH_1.md` / `_2.md` / `_3.md`.
+2. Compare the three on Q1–Q4 — typically you'll see a separated model vs unified model vs multi-label compromise.
+3. Look at the Cypher skeleton for the 6 `query_` functions across the three docs — pick the one that's shortest and least error-prone.
+4. The team votes on one design, writes the final schema into the **Graph Schema** section of `AI_SESSION_CONTEXT.md`, and the subsequent `seed_neo4j.py` and `query_*` implementations follow that schema.
+
+**Verification (ask yourself after writing):**
+
+- [ ] Do the property tables include all 5 columns: name / type / required? / example / source JSON field?
+- [ ] Can all 6 `query_` functions be implemented against the proposed schema? (especially `query_interchange_path` cross-network and `query_delay_ripple` network-agnostic N-hop)
+- [ ] Does the Cypher skeleton's edge direction match the choice in Q3? (Option A means two `MERGE` statements)
+- [ ] Does the `INTERCHANGE` edge carry a `travel_time_min`? (NULL would break Dijkstra)
+- [ ] Did you avoid pulling anything other than `adjacent_stations` (e.g., schedules / fares) into the graph?
+
+**Common deviations (catch these in PR review):**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| AI added `schedules` or `bookings` properties to nodes | Didn't honour "only two station JSON files" | Drop those properties — leave them to PostgreSQL |
+| Cross-network edges built single-direction but Cypher uses `-[:INTERCHANGE]->` | Q3 chose A but only one `MERGE` written | Add the second `MERGE`, or switch Q3 to B |
+| `INTERCHANGE` has no `travel_time_min` | Q4 chose B but Dijkstra can't accept NULL | Switch back to A and set a default (e.g., 5) |
+| Both `MetroStation` label and `network: "metro"` property exist | Q1 chose A but borrowed the property from B | Pick one and stay consistent |
+
+### Template G: NLU Test Set Generation (Natural Language → Tool Call Mapping)
+
+> **When to use:** When you want to verify that the chain "user-typed natural language → agent dispatches the right tool → answer is correct" is actually working end to end.
+> This template asks the AI to generate a structured test set where each entry pairs an `user_input` string with the expected tool calls and the must-contain / must-not-contain answer keywords. You then run each input through the agent (manually or scripted) and diff against expectations to pinpoint exactly which kind of natural language is mis-routed.
+>
+> **Output file location:** `tests/agent_nlu/AGENT_NLU_TEST_CASES.md` (one shared file — anyone adding a test case commits it; pair with the runner `run_nlu_tests.py` in the same folder).
+
+```
+================================================================
+TASK: Generate an NLU → Tool Routing Test Set for the TransitFlow Agent
+================================================================
+
+I want to verify that the LLM in skeleton/agent.py correctly maps user
+natural-language inputs to the right tool calls and produces sensible
+answers. Please generate a markdown test set.
+
+[Available tools — from skeleton/agent.py TOOLS_SCHEMA, do not invent new ones]
+
+find_route(origin_id, destination_id, optimise_by?)
+check_national_rail_availability(origin_id, destination_id, travel_date?)
+get_national_rail_fare(schedule_id, fare_class, stops_travelled)
+check_metro_availability(origin_id, destination_id)
+calculate_metro_fare(schedule_id, stops_travelled)
+get_metro_fare(origin_id, destination_id)
+get_available_seats(schedule_id, travel_date, fare_class)
+make_booking(schedule_id, origin_station_id, destination_station_id, travel_date, fare_class, seat_id, ticket_type?)
+cancel_booking(booking_id)
+get_user_bookings()
+search_policy(query)
+find_alternative_routes(origin_id, destination_id, avoid_station_id, network?)
+get_delay_ripple(station_id, hops?)
+
+[Known world (excerpted from SYSTEM_PROMPT)]
+- Metro: MS01–MS20, lines M1–M4
+- National Rail: NR01–NR10, lines NR1–NR2
+- Cross-network interchanges: Central=MS01/NR01, Old Town=MS07/NR03, Ferndale=MS15/NR07
+- Login-required tools: make_booking, cancel_booking, get_user_bookings (the rest do not need login)
+
+[Hard requirements]
+
+1. At least 24 test cases, evenly covering the 9 categories below — at
+   least 2 cases per category (≥ 1 for login-related):
+   - Routing (find_route)
+   - Availability (check_national_rail_availability / check_metro_availability)
+   - Fare (get_metro_fare / calculate_metro_fare / get_national_rail_fare)
+   - Booking flow (get_available_seats → make_booking)
+   - Cancellation (cancel_booking)
+   - User history (get_user_bookings)
+   - Policy / refund / compensation (search_policy)
+   - Disruption (find_alternative_routes / get_delay_ripple)
+   - Out-of-scope / grey area (e.g. "what's the weather today?" should produce no tool call; or booking before login)
+
+2. Roughly 50/50 split between English and zh-TW. Include at least 2 colloquial,
+   incomplete, or pronoun-laden inputs (e.g. "幫我看 NR01 到 NR05" / "cheapest one please" / "cancel the last one").
+
+3. Every entry must contain all 8 fields below — none may be omitted:
+
+   id              T01, T02, ... sequential
+   category        one of the 9 categories above
+   language        zh-TW or en
+   requires_login  true or false (whether the tool that should fire requires login)
+   user_input      the literal string the user typed (one sentence, not over-polished)
+   expected_tool_calls   list of {name, params}, in expected call order;
+                         use [] if no tool should be called
+   expected_answer_must_contain      list[str] of keywords that must appear in the answer
+   expected_answer_must_not_contain  list[str] of strings that must not appear in the answer
+                                     (e.g. for a 45-min delay under RF005,
+                                      "no compensation" / "0% refund" must not appear)
+
+4. At least 3 regression cases pinned to known bugs:
+   (a) Delay 30–59 minutes → must hit RF005_R1 50% refund (search_policy)
+   (b) travel_date passed as the string 'null' → must still route to
+       check_national_rail_availability (with travel_date as null or omitted in params,
+       never with the literal string 'null' as a date)
+   (c) Booking attempted while not logged in → expected_tool_calls is [] or excludes
+       make_booking; answer_must_contain includes "log in" / "登入"
+
+5. Do not stuff schedule_id or other values that require a prior lookup into
+   expected_tool_calls. For two-step flows (e.g. availability → fare), list both tools
+   and mark the downstream schedule_id as "<from_previous_result>".
+
+[Output format]
+
+Write the markdown directly to
+/path/to/tests/agent_nlu/AGENT_NLU_TEST_CASES.md, with this structure:
+
+# TransitFlow Agent — NLU Test Set
+
+## Summary
+- Total cases: N
+- zh-TW vs en ratio: ...
+- Category distribution: ...
+- Known-bug regressions: T0X, T0Y, T0Z
+
+## Test Matrix
+
+Each case rendered as the markdown block below (do not collapse into a table —
+too many fields will be hard to read):
+
+### T01 · <category> · <language>
+
+- requires_login: ...
+- user_input:
+  > <one line of user input>
+- expected_tool_calls:
+  ```json
+  [
+    {"name": "...", "params": {...}}
+  ]
+  ```
+- expected_answer_must_contain: [...]
+- expected_answer_must_not_contain: [...]
+- notes (optional): one sentence on what trap this case is hunting
+```
+
+**Usage (manual or scripted):**
+
+1. Paste this template into your AI, generate `tests/agent_nlu/AGENT_NLU_TEST_CASES.md`.
+2. Run `python tests/agent_nlu/run_nlu_tests.py` to drive every `user_input` through the agent automatically (or feed them manually via `python -m skeleton.ui`).
+3. Diff `expected_tool_calls` against the actual tool list the agent emits — any mismatch is a routing bug.
+4. Filter the answer text against `expected_answer_must_contain` / `must_not_contain` to catch fallbacks, hallucinations, and missing info.
+5. When a regression case fails, fix the corresponding code in `databases/` or `skeleton/agent.py` — do not relax the test case to make it pass.
+
+**Verification (ask yourself after writing):**
+
+- [ ] All 9 categories have ≥ 2 cases? (≥ 1 for login-related)
+- [ ] zh-TW vs en split is roughly 1:1?
+- [ ] Every case has all 8 fields populated?
+- [ ] `expected_tool_calls` references only tool names that actually exist in TOOLS_SCHEMA?
+- [ ] At least 3 regression cases (45-min delay / 'null' string / pre-login booking) are present?
+- [ ] For two-step flows, downstream `schedule_id` is marked `"<from_previous_result>"` rather than a fake fixed value?
+
 ### How to Share Prompts That Worked
 
 When you find a prompt that produces good output, add it to the **Prompts log** section of `AI_SESSION_CONTEXT.md`. Your teammates can reuse it instead of spending time writing their own.

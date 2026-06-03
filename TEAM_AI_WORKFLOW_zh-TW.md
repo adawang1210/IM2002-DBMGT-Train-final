@@ -765,6 +765,135 @@ national_rail_stations.json 第一筆紀錄:
 | `INTERCHANGE` 沒有 `travel_time_min` | Q4 選了 B 但忘了 Dijkstra 不容許 NULL | 改回 A 給預設值 (例如 5) |
 | 同時用 `MetroStation` label 又有 `network: "metro"` property | Q1 選 A 卻又抄 B 的屬性 | 二擇一,保持一致 |
 
+### 範本 G:NLU 測資產生 (自然語言 → 工具呼叫對照表)
+
+> **使用時機:** 想驗證「使用者輸入的自然語言 → agent 真的有觸發正確的 tool」整條鏈路是否運作時。
+> 這份範本會請 AI 產一份結構化的測試集,每筆測試含「輸入字串 + 預期 tool 呼叫 + 預期回答要點」,
+> 你拿這份清單去手動或自動跑 agent,逐筆比對輸出,就能精確指出哪一類自然語言路由錯了。
+>
+> **產出檔案位置:** `tests/agent_nlu/AGENT_NLU_TEST_CASES.md` (團隊共用一份, 任何人新增測例就 commit;搭配同資料夾的自動化腳本 `run_nlu_tests.py` 使用)。
+
+```
+================================================================
+TASK: 為 TransitFlow agent 產生 NLU → Tool 路由測試集
+================================================================
+
+我要驗證 skeleton/agent.py 的 LLM 是否能把使用者自然語言輸入,
+正確路由到對應的 tool 呼叫並產生合理回答。請產一份 markdown 測試集。
+
+【可用的 tools (來自 skeleton/agent.py 的 TOOLS_SCHEMA, 不要發明新的)】
+
+find_route(origin_id, destination_id, optimise_by?)
+check_national_rail_availability(origin_id, destination_id, travel_date?)
+get_national_rail_fare(schedule_id, fare_class, stops_travelled)
+check_metro_availability(origin_id, destination_id)
+calculate_metro_fare(schedule_id, stops_travelled)
+get_metro_fare(origin_id, destination_id)
+get_available_seats(schedule_id, travel_date, fare_class)
+make_booking(schedule_id, origin_station_id, destination_station_id, travel_date, fare_class, seat_id, ticket_type?)
+cancel_booking(booking_id)
+get_user_bookings()
+search_policy(query)
+find_alternative_routes(origin_id, destination_id, avoid_station_id, network?)
+get_delay_ripple(station_id, hops?)
+
+【已知世界 (從 SYSTEM_PROMPT 摘錄)】
+- Metro: MS01–MS20, 路線 M1–M4
+- National Rail: NR01–NR10, 路線 NR1–NR2
+- 跨網路轉乘: Central=MS01/NR01, Old Town=MS07/NR03, Ferndale=MS15/NR07
+- 需登入的 tool: make_booking, cancel_booking, get_user_bookings (其餘不必)
+
+【硬性要求】
+
+1. 至少 24 筆測例, 平均涵蓋下面 9 大類, 每類 ≥ 2 筆 (登入相關類 ≥ 1):
+   - Routing (find_route)
+   - Availability (check_national_rail_availability / check_metro_availability)
+   - Fare (get_metro_fare / calculate_metro_fare / get_national_rail_fare)
+   - Booking flow (get_available_seats → make_booking)
+   - Cancellation (cancel_booking)
+   - User history (get_user_bookings)
+   - Policy / refund / compensation (search_policy)
+   - Disruption (find_alternative_routes / get_delay_ripple)
+   - Out-of-scope / 灰色地帶 (例如「今天天氣?」應該回沒有 tool, 或登入前的 booking)
+
+2. 中英文各占約一半 (zh-TW + en), 並包含至少 2 筆口語、不完整或代名詞句子
+   (例如 "幫我看 NR01 到 NR05" / "cheapest one please" / "cancel the last one")
+
+3. 每一筆必須有下列 8 欄, 一欄都不能少:
+
+   id              T01, T02, ... 連號
+   category        上面 9 類其中之一
+   language        zh-TW 或 en
+   requires_login  true 或 false (對應該觸發的 tool 是否需要登入)
+   user_input      使用者實際打的字串 (一句話, 不要過度精緻)
+   expected_tool_calls   list of {name, params}, 順序就是預期呼叫順序;
+                         若不該呼叫任何 tool, 寫 []
+   expected_answer_must_contain      list[str], 答案必須出現的關鍵字
+   expected_answer_must_not_contain  list[str], 答案不該出現的反例
+                                     (例如 RF005 45 分鐘延遲就不該出現
+                                      "no compensation" / "0% refund")
+
+4. 至少 3 筆鎖定已知 bug 的 regression case:
+   (a) 延遲 30–59 分鐘 → 必須命中 RF005_R1 50% 退款 (search_policy)
+   (b) travel_date 給字串 'null' → 仍應正確路由到 check_national_rail_availability
+       (params 中 travel_date 為 null 或省略, 不要硬把 'null' 當日期)
+   (c) 未登入時要求訂票 → expected_tool_calls 為 [] 或不含 make_booking;
+       answer_must_contain 包含「登入」/ "log in"
+
+5. 不要在 expected_tool_calls 內塞 schedule_id 等需要先查才能拿到的值;
+   若一個輸入是兩步驟流程 (例如先 availability 再 fare), 兩個 tool 都列,
+   後一個的 schedule_id 寫成 "<from_previous_result>" 標記就好。
+
+【輸出格式】
+
+直接寫一份 markdown 到
+/path/to/tests/agent_nlu/AGENT_NLU_TEST_CASES.md, 結構如下:
+
+# TransitFlow Agent — NLU 測資集
+
+## 摘要
+- 測例總數: N
+- 中文 / 英文比例: ...
+- 類別分布: ...
+- 已知 bug regression: T0X, T0Y, T0Z
+
+## 測試矩陣
+
+每筆用以下 markdown 區塊呈現 (不要塞進 table, 欄位太多會難讀):
+
+### T01 · <category> · <language>
+
+- requires_login: ...
+- user_input:
+  > <一行 user 輸入>
+- expected_tool_calls:
+  ```json
+  [
+    {"name": "...", "params": {...}}
+  ]
+  ```
+- expected_answer_must_contain: [...]
+- expected_answer_must_not_contain: [...]
+- notes (選填): 一句話說明這筆在抓什麼陷阱
+```
+
+**用法 (手動 / 自動跑):**
+
+1. 把這份範本貼給 AI, 產生 `tests/agent_nlu/AGENT_NLU_TEST_CASES.md`。
+2. 對每一筆 `user_input`, 用 `python tests/agent_nlu/run_nlu_tests.py` 自動跑 (或手動進 `python -m skeleton.ui` 餵進去)。
+3. 對照 `expected_tool_calls` 與 agent 真實呼叫的 tool 清單, 不一致就是路由錯。
+4. 對照 `expected_answer_must_contain` / `must_not_contain` 過答案文字, 抓回退、誤導、漏資訊。
+5. Regression case 失敗時直接到對應的 `databases/` 或 `skeleton/agent.py` 修, 不要改測例放水。
+
+**驗證 (寫完後對自己回答):**
+
+- [ ] 9 大類每類都 ≥ 2 筆, 登入類 ≥ 1?
+- [ ] 中英文比例接近 1:1?
+- [ ] 每筆 8 欄都齊?
+- [ ] expected_tool_calls 只引用 TOOLS_SCHEMA 裡實際存在的 tool name?
+- [ ] 至少 3 筆 regression (45min 延遲 / 'null' 字串 / 未登入訂票) 都有?
+- [ ] 兩步驟流程的後段 schedule_id 標 "<from_previous_result>", 沒硬寫假值?
+
 ### 如何分享有效的提示詞
 
 當你找到一個產生好輸出的提示詞時，將它加到 `AI_SESSION_CONTEXT.md` 的**提示詞日誌**區段。你的隊友可以重用它，而不用花時間寫自己的。
