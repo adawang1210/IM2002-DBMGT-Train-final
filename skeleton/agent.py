@@ -492,6 +492,28 @@ def _normalise_result(tool_name: str, result_json: str) -> str:
         return result_json
     if isinstance(data, dict) and "error" in data:
         return f"Error: {data['error']}"
+
+    # Special-case fare tools: 1B models cannot reliably do arithmetic from
+    # base + per_stop * stops, and they sometimes ignore the total we already
+    # computed. Hand them a pre-formatted single-line answer so they only need
+    # to read it back, not rewrite it.
+    if tool_name in ("get_metro_fare", "calculate_metro_fare", "get_national_rail_fare") \
+            and isinstance(data, dict) and "total_fare_usd" in data:
+        total = data.get("total_fare_usd")
+        base = data.get("base_fare_usd")
+        per_stop = data.get("per_stop_rate_usd")
+        stops = data.get("stops_travelled")
+        cls = data.get("fare_class")
+        cls_str = f" ({cls} class)" if cls else ""
+        breakdown = ""
+        if base is not None and per_stop is not None and stops is not None:
+            breakdown = f" = ${base:.2f} base + ${per_stop:.2f} per stop × {stops} stops"
+        return (
+            f"FARE ANSWER (already calculated, do not recompute)\n"
+            f"Total fare{cls_str}: ${total:.2f}{breakdown}\n"
+            f"State the total in your reply. Do not change the numbers."
+        )
+
     return _flatten_to_text(data)
 
 
@@ -637,15 +659,16 @@ JSON:"""
             debug_info.append(f"**Tool selection:** {selection_response}")
 
     # ── Deterministic fallbacks ────────────────────────────────────────────────
-    # llama3.2:1b is unreliable for tool routing on anything beyond trivial queries.
-    # Rules below cover every common query type.  Each rule only fires when the
-    # correct tool is not already selected with valid required params.
+    # llama3.2:1b is unreliable for tool routing. Each rule below is an
+    # INDEPENDENT if (not elif) so one rule can override another's bad call.
+    # Rules later in the list win when both apply (because they reassign tool_calls).
     _lower = _augmented_message.lower()
     _station_ids = re.findall(r'\b(MS\d{2}|NR\d{2})\b', _augmented_message, re.IGNORECASE)
     _two_stations = len(_station_ids) >= 2
 
     def _tool_selected(name: str, *required_params) -> bool:
-        """Return True only if tool `name` is in tool_calls with all required params set."""
+        """Return True only if tool `name` is in tool_calls with all required params set
+        at the top level (not nested in a 'parameters' / 'properties' wrapper)."""
         call = next((c for c in tool_calls if c.get("name") == name), None)
         if not call:
             return False
@@ -672,8 +695,26 @@ JSON:"""
                   {"origin_id": _station_ids[0].upper(), "destination_id": _station_ids[1].upper(), "optimise_by": _opt},
                   "route query")
 
+    # 1.5 Metro fare — explicit fare/price/cost question between two MS stations.
+    #     Independent rule (not chained), so it can fire even when no other rule does.
+    _fare_triggers = ("fare", "price", "cost", "how much", "票價", "票价", "多少錢", "多少钱")
+    if (_two_stations
+            and all(s.upper().startswith("MS") for s in _station_ids[:2])
+            and any(kw in _lower for kw in _fare_triggers)
+            and not _tool_selected("get_metro_fare", "origin_id", "destination_id")):
+        _fallback("get_metro_fare",
+                  {"origin_id": _station_ids[0].upper(), "destination_id": _station_ids[1].upper()},
+                  "metro fare query")
+
     # 2. Availability / trains / schedules between two stations
-    elif not tool_calls and _two_stations:
+    #    Trigger when the right tool isn't already selected with valid required
+    #    params — covers both "no tool chosen" and "tool chosen but params wrapped
+    #    in a `parameters`/`properties` schema dict by 1B native tool calling".
+    if (_two_stations
+            and not _tool_selected("check_national_rail_availability", "origin_id", "destination_id")
+            and not _tool_selected("check_metro_availability", "origin_id", "destination_id")
+            and not _tool_selected("get_metro_fare", "origin_id", "destination_id")
+            and not _tool_selected("find_route", "origin_id", "destination_id")):
         _avail_triggers = {"train", "trains", "service", "services", "run from", "runs from",
                            "schedule", "timetable", "available", "availability"}
         if any(kw in _lower for kw in _avail_triggers):
