@@ -187,6 +187,11 @@ class LLMProvider:
             "model": self._ollama_chat_model,
             "messages": clean_messages,
             "stream": False,
+            # Disable thinking mode for reasoning-capable models (qwen3, deepseek-r1, ...).
+            # Without this, qwen3 emits long <think>...</think> blocks before the answer
+            # and a single agent turn can easily take 60-120s. Ollama silently ignores
+            # this flag for models that don't support thinking, so it's safe to always send.
+            "think": False,
         }
 
         r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT)
@@ -248,6 +253,9 @@ class LLMProvider:
             "messages": clean,
             "tools":   ollama_tools,
             "stream":  False,
+            # See _ollama_chat — keep thinking off so tool selection isn't preceded
+            # by a 30-60s reasoning block on qwen3-class models.
+            "think":   False,
         }
         r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT)
         r.raise_for_status()
