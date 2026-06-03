@@ -325,13 +325,12 @@ def _execute_tool(
                 result = {"error": "No metro service found between these stations."}
             else:
                 sched = schedules[0]
-                stops = sched.get("stops_in_order") or []
-                if isinstance(stops, str):
-                    import json as _json
-                    stops = _json.loads(stops)
-                try:
-                    n_stops = stops.index(params["destination_id"]) - stops.index(params["origin_id"])
-                except ValueError:
+                # query_metro_schedules already computes (d.stop_order - o.stop_order)
+                # in SQL and returns it as `total_stops_travelled`. The previous code
+                # tried to look up a non-existent `stops_in_order` array and silently
+                # fell back to n_stops=1, producing wrong fares (e.g. $1.10 instead of $2.00).
+                n_stops = sched.get("total_stops_travelled")
+                if n_stops is None:
                     n_stops = 1
                 fare = query_metro_fare(sched["schedule_id"], n_stops)
                 result = {
