@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import string
 from datetime import datetime, timezone
 from typing import Optional
@@ -83,9 +84,12 @@ def query_national_rail_availability(
         destination_id:  e.g. "NR05"
         travel_date:     e.g. "2025-06-01" — used to count bookings; omit for general info
     """
-    # Defensive: LLM sometimes passes the string 'null' / 'None' / '' instead of None.
-    # 在進 SQL 前統一正規化, 避免 psycopg2 把字串 'null' 當成日期值送進 DB 噴 InvalidDatetimeFormat。
-    if isinstance(travel_date, str) and travel_date.strip().lower() in ("", "null", "none"):
+    # Defensive: LLM sometimes passes a non-date string ('null', 'NA', 'N/A',
+    # 'unknown', '未知', 'NaN', 'TBD' — and we cannot enumerate every variant) to
+    # satisfy a "required" field. Anything that doesn't match strict YYYY-MM-DD
+    # is treated as None, which the SQL branch below already handles correctly.
+    if not (isinstance(travel_date, str)
+            and re.match(r"^\d{4}-\d{2}-\d{2}$", travel_date.strip())):
         travel_date = None
 
     # 為什麼用這個 SQL: 用 stops 子表自 join (alias o, d) 同時抓 origin / destination 兩站,

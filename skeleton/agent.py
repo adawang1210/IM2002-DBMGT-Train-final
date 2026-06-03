@@ -513,6 +513,34 @@ def _normalise_result(tool_name: str, result_json: str) -> str:
             f"State the total in your reply. Do not change the numbers."
         )
 
+    # Special-case availability tools: 1B models routinely look at a list of
+    # schedules and then reply "no service exists" — they don't trust the data.
+    # Front-load an explicit "X services available" sentence so the conclusion
+    # is unambiguous, then list every schedule on its own line. The LLM still
+    # gets the underlying fields (schedule_id, line, departure_time, ...) so
+    # it can compose a fluent reply, but it can no longer pretend the list is empty.
+    if tool_name in ("check_national_rail_availability", "check_metro_availability") \
+            and isinstance(data, list):
+        n = len(data)
+        if n == 0:
+            return (
+                "AVAILABILITY ANSWER: 0 services available between these stations.\n"
+                "Tell the user there are no direct services."
+            )
+        lines = [f"AVAILABILITY ANSWER: {n} service(s) available — listed below. Do not say 'no service'."]
+        for i, sch in enumerate(data, 1):
+            sid = sch.get("schedule_id", "?")
+            line = sch.get("line", "?")
+            stype = sch.get("service_type")
+            stype_str = f", {stype}" if stype else ""
+            dep = sch.get("departure_time", "?")
+            stops = sch.get("total_stops_travelled")
+            stops_str = f", {stops} stops" if stops is not None else ""
+            seats = sch.get("seats_taken")
+            seats_str = f", {seats} seats taken" if seats is not None else ""
+            lines.append(f"  {i}. {sid} (line {line}{stype_str}, departs {dep}{stops_str}{seats_str})")
+        return "\n".join(lines)
+
     return _flatten_to_text(data)
 
 
