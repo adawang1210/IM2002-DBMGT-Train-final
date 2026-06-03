@@ -35,6 +35,7 @@ from datetime import date
 from typing import Optional
 
 from skeleton.llm_provider import llm
+from skeleton.config import VECTOR_TOP_K
 from databases.relational.queries import (
     query_national_rail_availability,
     query_national_rail_fare,
@@ -295,10 +296,16 @@ def _execute_tool(
     tool_name: str,
     params: dict,
     current_user_email: Optional[str] = None,
+    original_message: Optional[str] = None,
 ) -> str:
     """
     Execute a tool call and return the result as a JSON string.
     This is where the LLM's decision meets the actual databases.
+
+    original_message is the raw user input before the LLM rewrote it into a
+    tool query. search_policy uses it as a fallback embed source when the
+    LLM-rewritten query embeds poorly (e.g. zh-TW → zh-CN translation by
+    qwen2.5 hurts cosine similarity against the English policy docs).
     """
     try:
         if tool_name == "check_national_rail_availability":
@@ -381,8 +388,57 @@ def _execute_tool(
             result = data if ok else {"error": data}
 
         elif tool_name == "search_policy":
-            embedding = llm.embed(params["query"])
-            docs = query_policy_vector_search(embedding)
+            # Dual-query embed: search both with the LLM-rewritten query AND with
+            # the raw user message, then merge by best similarity per document.
+            # This rescues the common failure mode where qwen2.5 translates
+            # zh-TW user input to zh-CN before calling search_policy, dropping
+            # cosine similarity below the threshold (e.g. "我可以帶寵物搭車嗎"
+            # retrieves the right docs at 0.55, but "可以带宠物搭车吗" only finds
+            # an unrelated General Rules doc at 0.51).
+            seen: dict[int, dict] = {}
+            queries: list[str] = []
+            llm_query = (params.get("query") or "").strip()
+            if llm_query:
+                queries.append(llm_query)
+            if original_message and original_message.strip() and original_message.strip() != llm_query:
+                queries.append(original_message.strip())
+            if not queries:
+                queries = [""]
+            for q in queries:
+                for d in query_policy_vector_search(llm.embed(q)):
+                    key = d.get("id") or d["title"]
+                    prev = seen.get(key)
+                    if prev is None or d["similarity"] > prev["similarity"]:
+                        seen[key] = d
+            docs = sorted(seen.values(), key=lambda d: d["similarity"], reverse=True)[:VECTOR_TOP_K]
+
+            # Safety net: if every match was below the threshold and got filtered
+            # out (common for short Chinese queries against English docs), do an
+            # unfiltered top-1 lookup so the LLM at least gets *something* relevant
+            # to ground itself on, instead of replying "no records" and inventing.
+            if not docs and queries:
+                # Bypass the threshold by hand-rolling a top-1 query. We still
+                # show the score so the LLM (and the debug panel) can judge it.
+                from databases.relational.queries import _connect  # private but stable
+                vec_emb = llm.embed(queries[0])
+                vec_str = "[" + ",".join(str(x) for x in vec_emb) + "]"
+                fallback_sql = """
+                    SELECT title, category, content,
+                           1 - (embedding <=> %s::vector) AS similarity
+                    FROM policy_documents
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT 1
+                """
+                with _connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(fallback_sql, (vec_str, vec_str))
+                        row = cur.fetchone()
+                        if row:
+                            docs = [{
+                                "title": row[0], "category": row[1],
+                                "content": row[2], "similarity": float(row[3]),
+                            }]
+
             # 不截 content: 政策文件本身不大 (RF005 約 1.3k 字), 截到 800 會把
             # compensation_rules 切半, LLM 看不到 30-59 min / 60-119 min / >=120 min
             # 的全部分級, 進而誤回 "no compensation". 直接給完整 content 換取正確性。
@@ -539,6 +595,55 @@ def _normalise_result(tool_name: str, result_json: str) -> str:
             seats = sch.get("seats_taken")
             seats_str = f", {seats} seats taken" if seats is not None else ""
             lines.append(f"  {i}. {sid} (line {line}{stype_str}, departs {dep}{stops_str}{seats_str})")
+        return "\n".join(lines)
+
+    # Special-case find_route / find_alternative_routes: the path is a list of
+    # station dicts that the 1B model cannot reliably read in nested form. It
+    # often emits a 3-station loop or wrong total time. Render the path as one
+    # explicit "A -> B -> C" line plus the totals so there is no ambiguity.
+    #
+    # NOTE: find_route dispatches to 3 graph queries with different return shapes:
+    #   - query_shortest_route / query_cheapest_route → key 'path'
+    #   - query_interchange_path (cross-network)      → key 'stations' + 'interchange_points'
+    # We accept either, in that priority.
+    if tool_name == "find_route" and isinstance(data, dict) and data.get("found"):
+        path = data.get("path") or data.get("stations") or []
+        names = [p.get("name") or p.get("station_id", "?") for p in path]
+        ids = [p.get("station_id", "?") for p in path]
+        arrow = " → ".join(f"{n} ({i})" for n, i in zip(names, ids))
+        total_time = data.get("total_time_min")
+        total_cost = data.get("total_cost_usd") or data.get("total_fare_usd")
+        interchanges = data.get("interchange_points") or []
+        bits = [f"ROUTE ANSWER (already computed, do not invent stations):",
+                f"Path: {arrow}",
+                f"Stops on path: {len(path)}"]
+        if total_time is not None:
+            bits.append(f"Total travel time: {total_time} minutes")
+        if total_cost is not None:
+            bits.append(f"Total fare: ${float(total_cost):.2f}")
+        if interchanges:
+            bits.append(f"Interchange transfers: {', '.join(interchanges)}")
+        bits.append("List the stations in this exact order. Do not repeat or skip stations.")
+        return "\n".join(bits)
+    if tool_name == "find_route" and isinstance(data, dict) and data.get("found") is False:
+        return (
+            "ROUTE ANSWER: no route found between these stations in the requested network.\n"
+            "Tell the user no path exists. Do not invent intermediate stations."
+        )
+
+    if tool_name == "find_alternative_routes" and isinstance(data, list):
+        n = len(data)
+        if n == 0:
+            return ("ROUTE ANSWER: 0 alternative routes available.\n"
+                    "Tell the user no alternative path exists.")
+        lines = [f"ROUTE ANSWER: {n} alternative route(s) — listed below."]
+        for i, route in enumerate(data, 1):
+            legs = route.get("legs") or route.get("path") or []
+            ids = [(l.get("station_id") or l.get("name") or "?") for l in legs]
+            arrow = " → ".join(ids)
+            tt = route.get("total_time_min")
+            tt_str = f", {tt} min" if tt is not None else ""
+            lines.append(f"  {i}. {arrow}{tt_str}")
         return "\n".join(lines)
 
     return _flatten_to_text(data)
@@ -708,19 +813,44 @@ JSON:"""
         if debug:
             debug_info.append(f"**Fallback:** {reason} → {name}({params})")
 
-    # 1. Route / directions / path — also overrides wrong-tool selections
+    # 1. Route / directions / path — also overrides wrong-tool selections.
+    #    Skip when the user is asking for *alternative* routes (handled by rule
+    #    1.4) or when the LLM already picked find_alternative_routes — those
+    #    cases need 3 station IDs, not 2, and the first-two-station heuristic
+    #    used here would pick the wrong pair.
     _route_triggers = {"fastest route", "quickest route", "shortest route", "cheapest route",
                        "best route", "how to get", "directions from", "route from", "route to",
                        "get from", "travel from", "way from", "path from"}
+    _alternative_triggers = ("alternative", "avoid", "closed", "disrupt", "繞", "繞過", "避開", "改道")
+    _is_alternative = any(kw in _lower for kw in _alternative_triggers)
     _is_route = (
         any(kw in _lower for kw in _route_triggers) or
         (_two_stations and "route" in _lower)
     )
-    if _is_route and _two_stations and not _tool_selected("find_route", "origin_id", "destination_id"):
+    if (_is_route and _two_stations
+            and not _is_alternative
+            and not _tool_selected("find_route", "origin_id", "destination_id")
+            and not _tool_selected("find_alternative_routes",
+                                   "origin_id", "destination_id", "avoid_station_id")):
         _opt = "cost" if any(kw in _lower for kw in ["cheap", "cheapest", "lowest cost"]) else "time"
         _fallback("find_route",
                   {"origin_id": _station_ids[0].upper(), "destination_id": _station_ids[1].upper(), "optimise_by": _opt},
                   "route query")
+
+    # 1.4 Alternative routes — explicit "if X is closed" / "avoid X" question.
+    #     Need 3 station IDs (origin, destination, avoid). Use first 3 occurrences
+    #     in text order; if there are only 2, leave the LLM's choice alone.
+    if (_is_alternative and len(_station_ids) >= 3
+            and not _tool_selected("find_alternative_routes",
+                                   "origin_id", "destination_id", "avoid_station_id")):
+        # Heuristic: the avoided station is named first in patterns like
+        # "if X is closed, route from O to D". Look for an explicit avoid hint;
+        # otherwise take ids in textual order assuming "X closed ... from O to D".
+        ids = [s.upper() for s in _station_ids[:3]]
+        avoid, origin, dest = ids[0], ids[1], ids[2]
+        _fallback("find_alternative_routes",
+                  {"origin_id": origin, "destination_id": dest, "avoid_station_id": avoid},
+                  "alternative-routes query")
 
     # 1.5 Metro fare — explicit fare/price/cost question between two MS stations.
     #     Independent rule (not chained), so it can fire even when no other rule does.
@@ -741,7 +871,9 @@ JSON:"""
             and not _tool_selected("check_national_rail_availability", "origin_id", "destination_id")
             and not _tool_selected("check_metro_availability", "origin_id", "destination_id")
             and not _tool_selected("get_metro_fare", "origin_id", "destination_id")
-            and not _tool_selected("find_route", "origin_id", "destination_id")):
+            and not _tool_selected("find_route", "origin_id", "destination_id")
+            and not _tool_selected("find_alternative_routes",
+                                   "origin_id", "destination_id", "avoid_station_id")):
         _avail_triggers = {"train", "trains", "service", "services", "run from", "runs from",
                            "schedule", "timetable", "available", "availability"}
         if any(kw in _lower for kw in _avail_triggers):
@@ -778,7 +910,8 @@ JSON:"""
         if debug:
             debug_info.append(f"**Calling:** `{tool_name}({params})`")
 
-        result_json = _execute_tool(tool_name, params, current_user_email)
+        result_json = _execute_tool(tool_name, params, current_user_email,
+                                    original_message=user_message)
 
         summary = _summarise_result(tool_name, result_json)
 
