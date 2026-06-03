@@ -194,13 +194,16 @@ class LLMProvider:
         return r.json()["message"]["content"]
 
     def _ollama_embed(self, text: str) -> List[float]:
+        # Use the modern /api/embed endpoint (input + embeddings[]).
+        # The legacy /api/embeddings endpoint panics on certain inputs with
+        # newer Ollama runner versions (>=0.6 nomic-embed-text manifest).
         r = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": OLLAMA_EMBED_MODEL, "prompt": text},
+            f"{OLLAMA_BASE_URL}/api/embed",
+            json={"model": OLLAMA_EMBED_MODEL, "input": text},
             timeout=60,
         )
         r.raise_for_status()
-        return r.json()["embedding"]
+        return r.json()["embeddings"][0]
 
     def ollama_tool_call(
         self,
