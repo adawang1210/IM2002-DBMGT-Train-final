@@ -53,7 +53,9 @@ NLU_TEST_USER_EMAIL=alice@example.com \
 
 - **Tool 順序嚴格** — 第一筆呼叫必須是 expected 的第一筆;名稱不一致直接 FAIL。
 - **Params 採 subset 比對** — expected 寫的 key 必須在 actual 中相等,actual 多寫的 key 不算錯。
-- **`<from_previous_result>` 是萬用字元** — 兩步驟流程下游的動態 ID,runner 會跳過比對。
+- **兩個通配字串跳過比對:**
+  - `"<from_previous_result>"` — 兩步驟流程下游的動態 ID(例如 booking_id 要先查 user_bookings 才知道)
+  - `"<any>"` — 純粹不要管這個 key 的值(例如 `search_policy.query` 是自然語言改寫,不該斷言字面相等)
 - **must_contain / must_not_contain 採大小寫不敏感** — 所有比對都先 `.lower()`。
 
 ## 加新測例

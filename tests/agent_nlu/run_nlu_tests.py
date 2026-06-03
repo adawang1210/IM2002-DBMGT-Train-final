@@ -11,8 +11,10 @@ TransitFlow Agent — NLU Test Runner
 設計原則:
   - 不依賴 pytest, 用純 stdlib 解析 markdown, 直接 import skeleton.agent
   - tool name 比對採嚴格順序; params 比對採 "subset match" — 只要 expected
-    裡寫死的 key 在 actual 中相等即可 (寫成 "<from_previous_result>" 的值
-    一律跳過, 因為它是動態解析的 placeholder)
+    裡寫死的 key 在 actual 中相等即可
+  - 兩個通配字串會跳過比對:
+      "<from_previous_result>" — 兩步驟流程下游動態 ID
+      "<any>"                  — 允許任意值 (e.g. free-form policy query)
   - 每筆測例彼此獨立, 用全新 history=[]
   - 預設不登入; requires_login=true 的測例會用環境變數 NLU_TEST_USER_EMAIL 傳入登入 email
     (沒設就以 guest 身份跑, 這時登入相關的測例可能失敗 — 屬預期)
@@ -145,30 +147,41 @@ _CALL_RE = re.compile(r"\*\*Calling:\*\*\s*`([a-z_]+)\((.*?)\)`", re.DOTALL)
 
 
 def extract_actual_calls(debug_info: list[str]) -> list[dict]:
-    """Pull the actual tool name + params dict from agent debug info."""
+    """Pull the actual tool name + params dict from agent debug info.
+
+    Note: skeleton.agent.run_agent in streaming mode yields debug_info as
+    individual character chunks (one element per char). We therefore join the
+    whole list into one string before scanning, instead of per-element regex.
+    """
+    blob = "".join(debug_info) if debug_info else ""
     actual: list[dict] = []
-    for entry in debug_info:
-        for m in _CALL_RE.finditer(entry):
-            name = m.group(1)
-            params_repr = m.group(2).strip()
-            # The repr is python dict-like; eval it safely via ast.literal_eval
-            try:
-                import ast
-                params = ast.literal_eval(params_repr) if params_repr else {}
-            except (ValueError, SyntaxError):
-                params = {}
-            actual.append({"name": name, "params": params})
+    import ast
+    for m in _CALL_RE.finditer(blob):
+        name = m.group(1)
+        params_repr = m.group(2).strip()
+        try:
+            params = ast.literal_eval(params_repr) if params_repr else {}
+        except (ValueError, SyntaxError):
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        actual.append({"name": name, "params": params})
     return actual
 
 
 # ── 比對 ────────────────────────────────────────────────────────────────────
 
 PLACEHOLDER = "<from_previous_result>"
+WILDCARD = "<any>"
+_WILDCARDS = {PLACEHOLDER, WILDCARD}
 
 
 def compare_calls(expected: list[dict], actual: list[dict]) -> tuple[bool, str]:
     """Return (ok, reason). Order-strict on tool names; params: subset match,
-    PLACEHOLDER values are skipped (treated as wildcards)."""
+    wildcard values are skipped:
+      - "<from_previous_result>" : value comes from a prior tool call (dynamic)
+      - "<any>"                  : value not asserted (e.g. free-form policy query)
+    """
     if len(expected) != len(actual):
         return False, f"call count differs: expected {len(expected)}, got {len(actual)}"
 
@@ -178,7 +191,7 @@ def compare_calls(expected: list[dict], actual: list[dict]) -> tuple[bool, str]:
         exp_params = exp.get("params", {}) or {}
         act_params = act.get("params", {}) or {}
         for k, v in exp_params.items():
-            if v == PLACEHOLDER:
+            if v in _WILDCARDS:
                 continue
             if act_params.get(k) != v:
                 return False, (
