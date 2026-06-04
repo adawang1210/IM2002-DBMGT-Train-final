@@ -903,6 +903,24 @@ too many fields will be hard to read):
 - [ ] At least 3 regression cases (45-min delay / 'null' string / pre-login booking) are present?
 - [ ] For two-step flows, downstream `schedule_id` is marked `"<from_previous_result>"` rather than a fake fixed value?
 
+### Template H: Fixing Code Based on a Code Review Report
+
+> **When to use:** When a teammate or senior provides a detailed Code Review report on a GitHub PR (including bugs, spec deviations, and suggestions) and you want AI to fix all issues safely in one go.
+
+```text
+I received a Code Review report for my code. Please help me fix all the issues based on the suggestions in the report in one go, and output the complete, updated code.
+
+[Strict Rules]
+1. For every issue or bug mentioned in the report, add a short comment above the modified code (e.g., `# Fix Issue #2: Align docstring with spec`) to help the reviewer easily verify the changes.
+2. NEVER modify any features or logic that are *not* mentioned in the report. Keep the unaffected parts exactly as they are.
+3. Ensure the modified code follows the existing architectural conventions and has no syntax errors.
+
+[Original Code to Modify]
+[Paste your current complete code]
+
+[Full Code Review Report]
+[Paste the markdown review report given by your teammate/reviewer]
+
 ### How to Share Prompts That Worked
 
 When you find a prompt that produces good output, add it to the **Prompts log** section of `AI_SESSION_CONTEXT.md`. Your teammates can reuse it instead of spending time writing their own.
