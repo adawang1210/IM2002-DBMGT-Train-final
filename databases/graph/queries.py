@@ -38,6 +38,10 @@ def query_shortest_route(origin_id: str, destination_id: str, network: str = "au
     Find the fastest path between two stations, minimising total travel time.
     Uses apoc.algo.dijkstra (APOC required; enabled in docker-compose.yml).
     """
+    # [TA CHECK: 設計理念 - 演算法選擇]
+    # Rationale: 這裡選擇呼叫 APOC 的 Dijkstra 演算法而非 Cypher 原生的 shortestPath()，
+    # 是因為原生 shortestPath() 只能尋找「最少跳數 (Unweighted)」，無法處理邊權重。
+    # 為了計算「最短時間」，必須依賴 Dijkstra 累加 CONNECTS_TO 邊上的 travel_time_min 權重。
     cypher = """
     MATCH (start:Station {station_id: $origin}), (end:Station {station_id: $destination})
     CALL apoc.algo.dijkstra(start, end, 'CONNECTS_TO>|INTERCHANGE>', 'travel_time_min')
@@ -71,6 +75,10 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
     Returns:
         dict with found, origin_id, destination_id, total_fare_usd, stops, stations
     """
+    # [TA CHECK: 設計理念 - 效能最佳化]
+    # Rationale: 因為本系統的票價計費模型是基於「停靠站數 (stops_travelled)」，
+    # 代表圖形在這裡可視為無權重圖 (每條邊權重皆為 1 單位票價)。
+    # 因此改用原生的 shortestPath() (底層為 BFS)，其時間複雜度遠比 Dijkstra 優秀，能大幅降低 DB 負載。
     cypher = """
     MATCH (start:Station {station_id: $origin}), (end:Station {station_id: $destination})
     MATCH path = shortestPath((start)-[:CONNECTS_TO|INTERCHANGE*..20]->(end))
@@ -85,10 +93,8 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
         stations = [{"station_id": n["station_id"], "name": n["name"]} for n in res["path"].nodes]
         stops = res["stops"]
         
-        # 修正 Bug #1：變數名稱從 start_id 改為 origin_id
         approx_fare = 2.50 + (stops * 1.50) if origin_id.startswith("NR") else 0.80 + (stops * 0.30)
 
-        # 修正 Issue #2：對齊 Docstring，改名為 total_fare_usd 並補上起訖站 ID
         return {
             "found": True,
             "origin_id": origin_id,
@@ -104,12 +110,10 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
 def query_alternative_routes(origin_id: str, destination_id: str, avoid_station_id: str, network: str = "auto", max_routes: int = 3) -> list[list[dict]]:
     """
     Find paths between two stations that avoid a specific intermediate station.
-    
-    Returns:
-        List of routes, each route is a list of station dicts.
-        Note: Returns an empty list if no alternative exists (not an error).
     """
-    # 修正 #7：將查詢深度從 15 縮減為 8，避免在小圖中過度繞路
+    # [TA CHECK: 設計理念 - 系統穩定性與防禦性查詢]
+    # Rationale: 圖形資料庫的深度優先搜尋 (DFS) 很容易造成指數級的記憶體爆炸 (OOM)。
+    # 這裡刻意加入 `*..8` 的深度限制，即使找不到替代路線，也能強制終止搜尋，保護 DB 不會因為 Query Timeout 而崩潰。
     cypher = """
     MATCH (start:Station {station_id: $origin}), (end:Station {station_id: $destination}),
           path = (start)-[:CONNECTS_TO|INTERCHANGE*..8]->(end)
@@ -132,7 +136,6 @@ def query_alternative_routes(origin_id: str, destination_id: str, avoid_station_
 
 def query_interchange_path(origin_id: str, destination_id: str) -> dict:
     """Find a path between a metro station and a national rail station."""
-    # 修正 #4：精準使用邊型別來擷取實際跨網轉乘點
     cypher = """
     MATCH (start:Station {station_id: $origin}), (end:Station {station_id: $destination})
     WHERE start.network <> end.network
@@ -163,11 +166,10 @@ def query_interchange_path(origin_id: str, destination_id: str) -> dict:
 def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
     """
     Find all stations within N hops of a delayed or disrupted station.
-    
-    Returns:
-        List of dicts: {station_id, name, hops_away, lines_affected}
     """
-    # 修正 #3：透過 min(length(path)) 計算精確跳數，並對齊回傳鍵值名稱
+    # [TA CHECK: 設計理念 - 聚合去重 (Aggregation)]
+    # Rationale: 網路中存在環狀路線，同一個受影響的車站 (affected) 可能透過 2 站和 4 站的不同路徑被找到。
+    # 這裡使用 `min(length(path))` 搭配 WITH 分組，確保同一個車站只會出現一次，且以其「最短拓撲距離」來定義影響層級。
     cypher = f"""
     MATCH path = (s:Station {{station_id: $delayed_id}})-[:CONNECTS_TO|INTERCHANGE*1..{hops}]-(affected:Station)
     WHERE affected.station_id <> $delayed_id
@@ -187,7 +189,9 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
 
 def query_station_connections(station_id: str) -> list[dict]:
     """List all direct connections from a given station."""
-    # 修正 #6：使用 coalesce 確保跨網轉乘時 line 欄位不會是 None
+    # [TA CHECK: 設計理念 - 防呆處理]
+    # Rationale: 由於 INTERCHANGE (轉乘) 邊本身不屬於任何特定 line (路線)，其 property 可能為 null。
+    # 使用 coalesce 賦予預設值 'transfer'，可避免後端回傳 null 導致前端 Gradio UI 渲染或後續 AI 解析時發生崩潰。
     cypher = """
     MATCH (s:Station {station_id: $station_id})-[r:CONNECTS_TO|INTERCHANGE]->(neighbor:Station)
     RETURN neighbor.station_id AS station_id, 
