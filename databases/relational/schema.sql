@@ -14,6 +14,15 @@
 --    2. 採用 Xan 的架構亮點 → polymorphic transaction_type、子表化 stops、self-reference
 --    3. 加上業界最佳實踐 → CHECK 約束、複合索引、避開 SQL 保留字
 --    4. station_adjacent 留給 Neo4j，不在這裡建表
+--
+--  Primary Key 設計說明：
+--    本 schema 所有業務實體 PK (users, stations, schedules, bookings, seats, payments)
+--    均採用 VARCHAR 而非 UUID 或 SERIAL。
+--    原因：mock data JSON 已使用 human-readable ID (e.g. "RU01", "NR_SCH01", "BK-A1B2C3")，
+--    直接採用相同型態可避免額外的 ID 映射表，並讓 seeder、agent、測試腳本得以使用
+--    可讀的業務識別碼。唯一例外是 policy_documents 使用 SERIAL (為系統內部自動管理，
+--    與業務 ID 無關)。
+--    正式生產系統建議改用 UUID + 隨機生成，以防 ID 可預測性安全疑慮。
 -- ============================================================
 
 
@@ -25,12 +34,17 @@ CREATE TABLE users (
     user_id          VARCHAR(10) PRIMARY KEY,
     full_name        VARCHAR(100) NOT NULL,
     email            VARCHAR(100) UNIQUE NOT NULL,
-    password         VARCHAR(100) NOT NULL,
+    -- bcrypt hash 固定 60 字元；使用 CHAR(60) 更精確但 VARCHAR(60) 也可接受。
+    -- 原始設計為明文 (VARCHAR(100))，此欄已在 register_user / update_password
+    -- 改用 bcrypt.hashpw() 存雜湊，login_user 改用 bcrypt.checkpw() 驗證。
+    password         VARCHAR(60) NOT NULL,
     phone            VARCHAR(20),
     date_of_birth    DATE,
     secret_question  TEXT,
     secret_answer    TEXT,
     registered_at    TIMESTAMPTZ DEFAULT NOW(),
+    -- 軟刪除 (Soft Delete)：停用帳號不硬刪除 user row，以保留歷史訂單關聯。
+    -- 訂單/交易紀錄採「狀態欄位 (status = cancelled)」取代物理刪除，符合稅務與審計保留要求。
     is_active        BOOLEAN DEFAULT TRUE
 );
 
