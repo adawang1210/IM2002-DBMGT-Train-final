@@ -57,6 +57,9 @@ gradio_cached_examples/
 
 # OS
 .DS_Store
+
+# Temporary local review/test scratch scripts (not part of the deliverable)
+.review_*.py
 Thumbs.db
 desktop.ini
 
