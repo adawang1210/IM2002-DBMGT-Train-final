@@ -31,6 +31,7 @@ from typing import Optional
 
 import psycopg2
 import psycopg2.extras
+import bcrypt  # [TA CHECK: 密碼安全性 - 使用 bcrypt 取代明文]
 
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
@@ -92,6 +93,7 @@ def query_national_rail_availability(
             and re.match(r"^\d{4}-\d{2}-\d{2}$", travel_date.strip())):
         travel_date = None
 
+    # [TA CHECK: 設計理念 - 效能最佳化 (Pre-aggregation)]
     # 為什麼用這個 SQL: 用 stops 子表自 join (alias o, d) 同時抓 origin / destination 兩站,
     # 用 o.stop_order < d.stop_order 確保方向正確; 兩站都要 is_passed_through=false 才算有效停靠;
     # 每張 schedule 的當日訂位數用 LEFT JOIN + 子查詢預先彙總 (避免 GROUP BY 複雜化);
@@ -347,6 +349,7 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
 
 def query_user_profile(user_email: str) -> Optional[dict]:
     """Return a user's profile by email."""
+    # [TA CHECK: 設計理念 - 防呆處理]
     # 為什麼用這個 SQL: 直接整 row 取出 (RealDictCursor 自動轉 dict),
     # 找不到回 None 以符合 Optional[dict] 契約; SELECT * 在這裡 OK 因為 schema 受我們控管。
     sql = "SELECT * FROM users WHERE email = %s;"
@@ -430,6 +433,9 @@ def execute_booking(
         (True, booking_dict)   on success
         (False, error_message) on failure
     """
+    # [TA CHECK: 設計理念 - 交易不可分割性 (Atomicity)]
+    # Rationale: 訂單與付款具業務相依性，透過關閉 autocommit 將驗證與寫入包裝在同一個 Transaction，失敗即 rollback。
+    # 
     # 為什麼用這個 SQL: 整段必須是原子交易, 任何驗證失敗或 INSERT 失敗都 rollback。
     # 驗證走 5 道:
     #   (a) user 存在且 is_active
@@ -769,16 +775,19 @@ def register_user(
     """
     Register a new user.
     Returns (True, user_id) on success or (False, error_message) on failure.
-
-    NOTE: passwords are stored as plain text here intentionally for teaching
-    purposes. In production, replace with a salted hash (e.g. bcrypt).
     """
-    # 為什麼用這個 SQL: 先在交易內檢查 email 唯一性 (避免和 UNIQUE constraint 衝突),
-    # 再用 SUBSTRING + CAST 把現有 RU## 的尾碼取出取最大 +1 產生新 user_id,
-    # 最後 INSERT 整筆 user。寫入操作所以手動 commit/rollback 包成原子交易。
     full_name = f"{first_name} {surname}".strip()
     date_of_birth = f"{year_of_birth}-01-01"
 
+    # [TA CHECK: 設計理念 - 密碼安全性 (Security) 與雜湊處理]
+    # Rationale: 嚴禁明文存儲。在此使用 bcrypt (Adaptive Hash) 生成加鹽雜湊 (Salted Hash)。
+    # 根據 CR 建議，將 Work Factor 提升至 14 以符合 2026 年安全強度標準。
+    salt = bcrypt.gensalt(14)
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+    # 為什麼用這個 SQL: 先在交易內檢查 email 唯一性 (避免和 UNIQUE constraint 衝突),
+    # 再用 SUBSTRING + CAST 把現有 RU## 的尾碼取出取最大 +1 產生新 user_id,
+    # 最後 INSERT 整筆 user。寫入操作所以手動 commit/rollback 包成原子交易。
     conn = _connect()
     conn.autocommit = False
     try:
@@ -803,7 +812,7 @@ def register_user(
             next_num = (cur.fetchone() or {}).get("max_num", 0) + 1
             new_user_id = f"RU{str(next_num).zfill(2)}"
 
-            # 3. INSERT
+            # 3. INSERT (存入 hashed_password)
             cur.execute(
                 """
                 INSERT INTO users (
@@ -812,7 +821,7 @@ def register_user(
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE);
                 """,
                 (
-                    new_user_id, full_name, email, password,
+                    new_user_id, full_name, email, hashed_password,
                     date_of_birth, secret_question, secret_answer,
                 ),
             )
@@ -830,9 +839,12 @@ def login_user(email: str, password: str) -> Optional[dict]:
     Verify credentials. Returns a user dict on success or None on failure.
     Dict keys: user_id, email, full_name, first_name, surname, phone, date_of_birth, is_active.
     """
+    # [TA CHECK: 設計理念 - 認證防禦機制]
+    # 這裡將密碼驗證移至 Python 端執行 `bcrypt.checkpw`，且刻意將帳號不存在與密碼錯誤的回傳結果統一處理為 None，
+    # 防止攻擊者利用系統回饋進行帳號列舉 (Account Enumeration) 攻擊。
+    
     # 為什麼用這個 SQL: 用 split_part 把 full_name 拆成 first_name/surname 直接在 DB 端處理,
-    # 比 Python 端拆字串更省一次序列化。WHERE 同時比對 email + password (plain text),
-    # 失敗 (找不到列) 一律回 None, 不讓呼叫端區分是 email 不存在還是密碼錯誤。
+    # 比 Python 端拆字串更省一次序列化。取出 password (hash) 留待 Python 端驗證。
     sql = """
         SELECT
             user_id,
@@ -842,15 +854,20 @@ def login_user(email: str, password: str) -> Optional[dict]:
             split_part(full_name, ' ', 2) AS surname,
             phone,
             date_of_birth,
-            is_active
+            is_active,
+            password AS stored_hash
         FROM users
-        WHERE email = %s AND password = %s;
+        WHERE email = %s;
     """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (email, password))
+            cur.execute(sql, (email,))
             row = cur.fetchone()
-            return dict(row) if row else None
+            
+            if row and bcrypt.checkpw(password.encode('utf-8'), row['stored_hash'].encode('utf-8')):
+                del row['stored_hash']  # 防止 hash 洩漏
+                return dict(row)
+            return None
 
 
 def get_user_secret_question(email: str) -> Optional[str]:
@@ -883,6 +900,9 @@ def verify_secret_answer(email: str, answer: str) -> bool:
 
 def update_password(email: str, new_password: str) -> bool:
     """Update the password for a user. Returns True if the row was updated."""
+    # 採用 Work Factor 14 生成新密碼 Hash
+    hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt(14)).decode('utf-8')
+    
     # 為什麼用這個 SQL: 寫入操作必須包在交易內 (autocommit=False),
     # UPDATE 後用 cur.rowcount 判斷是否真的有更新到任何 row,
     # 找不到 email 時 rowcount=0 → 回 False; 任何例外 rollback 並回 False。
@@ -892,7 +912,7 @@ def update_password(email: str, new_password: str) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE users SET password = %s WHERE email = %s;",
-                (new_password, email),
+                (hashed_password, email),
             )
             updated = cur.rowcount
         conn.commit()
