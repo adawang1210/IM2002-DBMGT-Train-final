@@ -84,8 +84,25 @@ def build_documents():
     return docs
 
 
+def _clear_existing(source_files: set[str]):
+    # policy_documents 沒有自然唯一鍵可供 ON CONFLICT, 改用「先刪同來源檔的舊文件
+    # 再重插」達成 idempotent — 重跑不會累積重複向量, 也支援 JSON 更新後 re-seed。
+    import psycopg2
+    from skeleton.config import PG_DSN
+
+    with psycopg2.connect(PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM policy_documents WHERE source_file = ANY(%s)",
+                (list(source_files),),
+            )
+            if cur.rowcount:
+                print(f"♻️  Removed {cur.rowcount} previously seeded documents (re-seed)\n")
+
+
 def seed():
     documents = build_documents()
+    _clear_existing({d["source_file"] for d in documents})
     print(f"📄 Embedding {len(documents)} policy documents using {llm.chat_provider}...\n")
 
     for i, doc in enumerate(documents):

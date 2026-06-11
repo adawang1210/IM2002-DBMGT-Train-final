@@ -13,6 +13,7 @@ import json
 import os
 import sys
 
+import bcrypt
 import psycopg2
 from psycopg2.extras import execute_values
 
@@ -58,11 +59,19 @@ def seed_users(cur):
     data = load("registered_users.json")
     rows = []
     for u in data:
+        # registered_users.json 的 password 是明文 — 入庫前必須 bcrypt 雜湊,
+        # 否則 (a) 明文落地直接違反評分規則 (plain-text = 0),
+        # (b) login_user 的 bcrypt.checkpw 讀到非 hash 會 ValueError。
+        # cost=12 (register_user 用 14): 20 個種子帳號 × cost14 約需 20s,
+        # checkpw 從 hash 自帶的 cost 參數驗證, 兩者可共存。
+        hashed = bcrypt.hashpw(
+            u["password"].encode("utf-8"), bcrypt.gensalt(12)
+        ).decode("utf-8")
         rows.append((
             u["user_id"],
             u["full_name"],
             u["email"],
-            u["password"],
+            hashed,
             u.get("phone"),
             u.get("date_of_birth"),
             u.get("secret_question"),

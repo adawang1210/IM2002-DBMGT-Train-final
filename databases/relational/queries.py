@@ -98,6 +98,8 @@ def query_national_rail_availability(
     # 用 o.stop_order < d.stop_order 確保方向正確; 兩站都要 is_passed_through=false 才算有效停靠;
     # 每張 schedule 的當日訂位數用 LEFT JOIN + 子查詢預先彙總 (避免 GROUP BY 複雜化);
     # travel_date 為 None 時 seats_taken 直接設 0。
+    # available_seats 動態計算 (座位總數 − 當日 confirmed 訂位數), 不依賴 occupancy 表 —
+    # 座位狀態的唯一真實來源是 bookings, 避免雙寫不同步。
     if travel_date is None:
         sql = """
             SELECT
@@ -107,7 +109,8 @@ def query_national_rail_availability(
                 s.direction,
                 s.first_train_time AS departure_time,
                 (d.stop_order - o.stop_order) AS total_stops_travelled,
-                0 AS seats_taken
+                0 AS seats_taken,
+                COALESCE(t.total_seats, 0) AS available_seats
             FROM national_rail_schedules s
             JOIN national_rail_schedule_stops o
               ON o.schedule_id = s.schedule_id
@@ -118,6 +121,11 @@ def query_national_rail_availability(
              AND d.station_id  = %s
              AND d.is_passed_through = FALSE
              AND d.stop_order > o.stop_order
+            LEFT JOIN (
+                SELECT schedule_id, COUNT(*) AS total_seats
+                FROM national_rail_seats
+                GROUP BY schedule_id
+            ) t ON t.schedule_id = s.schedule_id
             ORDER BY s.first_train_time;
         """
         params = (origin_id, destination_id)
@@ -130,7 +138,8 @@ def query_national_rail_availability(
                 s.direction,
                 s.first_train_time AS departure_time,
                 (d.stop_order - o.stop_order) AS total_stops_travelled,
-                COALESCE(b.seats_taken, 0) AS seats_taken
+                COALESCE(b.seats_taken, 0) AS seats_taken,
+                COALESCE(t.total_seats, 0) - COALESCE(b.seats_taken, 0) AS available_seats
             FROM national_rail_schedules s
             JOIN national_rail_schedule_stops o
               ON o.schedule_id = s.schedule_id
@@ -147,9 +156,18 @@ def query_national_rail_availability(
                 WHERE travel_date = %s AND status = 'confirmed'
                 GROUP BY schedule_id
             ) b ON b.schedule_id = s.schedule_id
+            LEFT JOIN (
+                SELECT schedule_id, COUNT(*) AS total_seats
+                FROM national_rail_seats
+                GROUP BY schedule_id
+            ) t ON t.schedule_id = s.schedule_id
+            -- operates_on 過濾: express 班次只跑平日 (mon-fri), 查詢日不在
+            -- 營運日陣列內的班次必須排除; to_char(date,'dy') 回 'mon'..'sun'
+            -- 與 JSON 的營運日縮寫一致。
+            WHERE lower(to_char(%s::date, 'dy')) = ANY(s.operates_on)
             ORDER BY s.first_train_time;
         """
-        params = (origin_id, destination_id, travel_date)
+        params = (origin_id, destination_id, travel_date, travel_date)
 
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -348,11 +366,25 @@ def auto_select_adjacent_seats(available_seats: list[dict], count: int) -> list[
 # ── USER & BOOKING QUERIES ────────────────────────────────────────────────────
 
 def query_user_profile(user_email: str) -> Optional[dict]:
-    """Return a user's profile by email."""
+    """Return a user's profile by email (without the password hash)."""
     # [TA CHECK: 設計理念 - 防呆處理]
-    # 為什麼用這個 SQL: 直接整 row 取出 (RealDictCursor 自動轉 dict),
-    # 找不到回 None 以符合 Optional[dict] 契約; SELECT * 在這裡 OK 因為 schema 受我們控管。
-    sql = "SELECT * FROM users WHERE email = %s;"
+    # 為什麼用這個 SQL: 明確列舉欄位而非 SELECT * — password hash 不得跟著 profile
+    # 流出到 agent prompt / UI; year_of_birth 從 date_of_birth 推導,
+    # 滿足回傳契約 (email, name, year_of_birth)。找不到回 None。
+    sql = """
+        SELECT
+            user_id,
+            full_name,
+            email,
+            phone,
+            date_of_birth,
+            EXTRACT(YEAR FROM date_of_birth)::int AS year_of_birth,
+            secret_question,
+            registered_at,
+            is_active
+        FROM users
+        WHERE email = %s;
+    """
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (user_email,))
@@ -863,8 +895,18 @@ def login_user(email: str, password: str) -> Optional[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (email,))
             row = cur.fetchone()
-            
-            if row and bcrypt.checkpw(password.encode('utf-8'), row['stored_hash'].encode('utf-8')):
+
+            if not row:
+                return None
+            try:
+                ok = bcrypt.checkpw(
+                    password.encode('utf-8'), row['stored_hash'].encode('utf-8')
+                )
+            except ValueError:
+                # stored_hash 不是合法 bcrypt hash (e.g. 舊資料庫殘留明文種子資料)。
+                # 視同密碼錯誤回 None — 登入函式契約是「絕不拋例外」。
+                return None
+            if ok:
                 del row['stored_hash']  # 防止 hash 洩漏
                 return dict(row)
             return None
