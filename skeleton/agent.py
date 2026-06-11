@@ -57,6 +57,13 @@ from databases.graph.queries import (
     query_delay_ripple,
 )
 
+# TASK 6 EXTENSION: Service Ratings & Popularity Analytics — surfaces the
+# previously-unused `feedback` table to the chat assistant via a new tool.
+from databases.relational.extensions import (
+    query_line_ratings,
+    query_top_rated_routes,
+)
+
 
 # ── Station name → ID lookup (resolved in Python, not by the LLM) ────────────
 
@@ -273,6 +280,21 @@ TOOLS = [
         },
         "required": ["station_id"],
     },
+    # TASK 6 EXTENSION: rider-satisfaction analytics tool.
+    {
+        "name": "get_service_ratings",
+        "description": (
+            "Show rider satisfaction analytics from real passenger feedback: "
+            "average star ratings per transit line and the best-rated routes. "
+            "Use for any question about reviews, ratings, satisfaction, how good "
+            "a line/route is, or which lines/routes riders like most. "
+            "Optionally filter by network ('metro' or 'rail')."
+        ),
+        "parameters": {
+            "network": {"type": "string", "description": "metro, rail, or omit for both"},
+        },
+        "required": [],
+    },
 ]
 
 TOOLS_SCHEMA = """\
@@ -281,13 +303,15 @@ check_national_rail_availability(origin_id, destination_id, travel_date?)
 get_national_rail_fare(schedule_id, fare_class, stops_travelled)
 check_metro_availability(origin_id, destination_id)
 calculate_metro_fare(schedule_id, stops_travelled)
+get_metro_fare(origin_id, destination_id)
 get_available_seats(schedule_id, travel_date, fare_class)
 make_booking(schedule_id, origin_station_id, destination_station_id, travel_date, fare_class, seat_id, ticket_type?)
 cancel_booking(booking_id)
 get_user_bookings()
 search_policy(query)
 find_alternative_routes(origin_id, destination_id, avoid_station_id, network?)
-get_delay_ripple(station_id, hops?)"""
+get_delay_ripple(station_id, hops?)
+get_service_ratings(network?)"""
 
 
 # ── Agent logic ───────────────────────────────────────────────────────────────
@@ -486,13 +510,33 @@ def _execute_tool(
                 avoid_station_id=params["avoid_station_id"],
                 network=params.get("network", "auto"),
             )
-            result = [{"route_number": i + 1, "legs": r} for i, r in enumerate(routes)]
+            result = [
+                {
+                    "route_number": i + 1,
+                    "legs": r["path"],
+                    "total_time_min": r["total_time_min"],
+                }
+                for i, r in enumerate(routes)
+            ]
 
         elif tool_name == "get_delay_ripple":
             result = query_delay_ripple(
                 delayed_station_id=params["station_id"],
                 hops=params.get("hops", 2),
             )
+
+        # TASK 6 EXTENSION: rider-satisfaction analytics. Bundles both new
+        # analytics queries (per-line averages + best-rated routes) into one
+        # payload so the LLM can answer line- and route-level questions from a
+        # single tool call. `network` is normalised and only forwarded when valid.
+        elif tool_name == "get_service_ratings":
+            network = (params.get("network") or "").strip().lower() or None
+            if network not in ("metro", "rail", None):
+                network = None
+            result = {
+                "line_ratings": query_line_ratings(network),
+                "top_rated_routes": query_top_rated_routes(min_reviews=1, limit=5),
+            }
 
         else:
             result = {"error": f"Unknown tool: {tool_name}"}
@@ -557,7 +601,8 @@ def _normalise_result(tool_name: str, result_json: str) -> str:
         total = data.get("total_fare_usd")
         base = data.get("base_fare_usd")
         per_stop = data.get("per_stop_rate_usd")
-        stops = data.get("stops_travelled")
+        # get_metro_fare 的合成結果用 'stops' key, 直接查 DB 的回傳用 'stops_travelled'
+        stops = data.get("stops_travelled", data.get("stops"))
         cls = data.get("fare_class")
         cls_str = f" ({cls} class)" if cls else ""
         breakdown = ""
@@ -592,8 +637,8 @@ def _normalise_result(tool_name: str, result_json: str) -> str:
             dep = sch.get("departure_time", "?")
             stops = sch.get("total_stops_travelled")
             stops_str = f", {stops} stops" if stops is not None else ""
-            seats = sch.get("seats_taken")
-            seats_str = f", {seats} seats taken" if seats is not None else ""
+            avail = sch.get("available_seats")
+            seats_str = f", {avail} seats available" if avail is not None else ""
             lines.append(f"  {i}. {sid} (line {line}{stype_str}, departs {dep}{stops_str}{seats_str})")
         return "\n".join(lines)
 
@@ -776,6 +821,8 @@ JSON:"""
                 "Metro fare/price/cost/how-much-does-it-cost questions → get_metro_fare. "
                 "Rail fare/cost/price questions → check_national_rail_availability then get_national_rail_fare. "
                 "Schedule/timetable/trains/services questions → check_national_rail_availability or check_metro_availability. "
+                # TASK 6 EXTENSION: route satisfaction/review questions to the analytics tool.
+                "Ratings/reviews/satisfaction/best-rated/how-good-is-a-line questions → get_service_ratings. "
                 "Only call a tool when needed. Output nothing except tool calls."
             ),
         )

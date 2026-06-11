@@ -78,14 +78,23 @@ CREATE TABLE national_rail_stations (
 --  3. SCHEDULES + STOPS
 -- ============================================================
 
+--  FK ON DELETE 策略 (全 schema 一致)：
+--    * 純組成子表 (schedule_stops / seats) → ON DELETE CASCADE,
+--      父 schedule 移除時子列無獨立存在意義。
+--    * 歷史 / 交易 / 參照表 (bookings, travel_history, feedback,
+--      station 參照) → ON DELETE RESTRICT, 配合軟刪除策略,
+--      防止誤刪父列摧毀稽核紀錄。
+--    * 自參照 day_pass_ref → ON DELETE SET NULL, 父 day-pass 移除
+--      不應連帶刪除子 trip。
+
 -- 國鐵時刻表 ----------------------------------------------------
 CREATE TABLE national_rail_schedules (
     schedule_id                  VARCHAR(20) PRIMARY KEY,
     line                         VARCHAR(10) NOT NULL,
     service_type                 VARCHAR(20) NOT NULL CHECK (service_type IN ('normal', 'express')),
     direction                    VARCHAR(20),
-    origin_station_id            VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    destination_station_id       VARCHAR(10) REFERENCES national_rail_stations(station_id),
+    origin_station_id            VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id       VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     first_train_time             TIME,
     last_train_time              TIME,
     -- 票價攤平成 4 欄 (參考 fare_classes JSON)
@@ -98,9 +107,9 @@ CREATE TABLE national_rail_schedules (
 );
 
 CREATE TABLE national_rail_schedule_stops (
-    schedule_id                   VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    schedule_id                   VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
     stop_order                    INTEGER NOT NULL,
-    station_id                    VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id),
+    station_id                    VARCHAR(10) NOT NULL REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     travel_time_from_origin_min   INTEGER NOT NULL,
     is_passed_through             BOOLEAN DEFAULT FALSE,  -- 快車經過但不停的站
     PRIMARY KEY (schedule_id, stop_order)
@@ -113,8 +122,8 @@ CREATE TABLE metro_schedules (
     schedule_id              VARCHAR(20) PRIMARY KEY,
     line                     VARCHAR(10) NOT NULL,
     direction                VARCHAR(20),
-    origin_station_id        VARCHAR(10) REFERENCES metro_stations(station_id),
-    destination_station_id   VARCHAR(10) REFERENCES metro_stations(station_id),
+    origin_station_id        VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id   VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     first_train_time         TIME,
     last_train_time          TIME,
     base_fare_usd            NUMERIC(5,2) NOT NULL DEFAULT 0.80,
@@ -124,9 +133,9 @@ CREATE TABLE metro_schedules (
 );
 
 CREATE TABLE metro_schedule_stops (
-    schedule_id                   VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id),
+    schedule_id                   VARCHAR(20) NOT NULL REFERENCES metro_schedules(schedule_id) ON DELETE CASCADE,
     stop_order                    INTEGER NOT NULL,
-    station_id                    VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id),
+    station_id                    VARCHAR(10) NOT NULL REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     travel_time_from_origin_min   INTEGER NOT NULL,
     PRIMARY KEY (schedule_id, stop_order)
 );
@@ -140,7 +149,7 @@ CREATE INDEX idx_metro_schedule_stops_station ON metro_schedule_stops(station_id
 -- ============================================================
 
 CREATE TABLE national_rail_seats (
-    schedule_id    VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id),
+    schedule_id    VARCHAR(20) NOT NULL REFERENCES national_rail_schedules(schedule_id) ON DELETE CASCADE,
     seat_id        VARCHAR(10) NOT NULL,
     coach          CHAR(1)     NOT NULL CHECK (coach IN ('A', 'B')),
     fare_class     VARCHAR(10) NOT NULL CHECK (fare_class IN ('standard', 'first')),
@@ -157,10 +166,10 @@ CREATE TABLE national_rail_seats (
 -- 國鐵訂票 -----------------------------------------------------
 CREATE TABLE national_rail_bookings (
     booking_id               VARCHAR(20) PRIMARY KEY,
-    user_id                  VARCHAR(10) REFERENCES users(user_id),
-    schedule_id              VARCHAR(20) REFERENCES national_rail_schedules(schedule_id),
-    origin_station_id        VARCHAR(10) REFERENCES national_rail_stations(station_id),
-    destination_station_id   VARCHAR(10) REFERENCES national_rail_stations(station_id),
+    user_id                  VARCHAR(10) REFERENCES users(user_id) ON DELETE RESTRICT,
+    schedule_id              VARCHAR(20) REFERENCES national_rail_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id        VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id   VARCHAR(10) REFERENCES national_rail_stations(station_id) ON DELETE RESTRICT,
     travel_date              DATE NOT NULL,
     departure_time           TIME,
     ticket_type              VARCHAR(20) CHECK (ticket_type IN ('single', 'return')),
@@ -182,13 +191,13 @@ CREATE INDEX idx_nr_bookings_user ON national_rail_bookings(user_id);
 -- 地鐵搭乘紀錄 -------------------------------------------------
 CREATE TABLE metro_travel_history (
     trip_id                  VARCHAR(20) PRIMARY KEY,
-    user_id                  VARCHAR(10) REFERENCES users(user_id),
-    schedule_id              VARCHAR(20) REFERENCES metro_schedules(schedule_id),
-    origin_station_id        VARCHAR(10) REFERENCES metro_stations(station_id),
-    destination_station_id   VARCHAR(10) REFERENCES metro_stations(station_id),
+    user_id                  VARCHAR(10) REFERENCES users(user_id) ON DELETE RESTRICT,
+    schedule_id              VARCHAR(20) REFERENCES metro_schedules(schedule_id) ON DELETE RESTRICT,
+    origin_station_id        VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
+    destination_station_id   VARCHAR(10) REFERENCES metro_stations(station_id) ON DELETE RESTRICT,
     travel_date              DATE NOT NULL,
     ticket_type              VARCHAR(20) CHECK (ticket_type IN ('single', 'day_pass')),
-    day_pass_ref             VARCHAR(20) REFERENCES metro_travel_history(trip_id),  -- 自參照
+    day_pass_ref             VARCHAR(20) REFERENCES metro_travel_history(trip_id) ON DELETE SET NULL,  -- 自參照
     stops_travelled          INTEGER,
     amount_usd               NUMERIC(10,2),
     status                   VARCHAR(20) CHECK (status IN ('completed', 'cancelled')),
@@ -230,7 +239,7 @@ CREATE TABLE feedback (
     feedback_id       VARCHAR(20) PRIMARY KEY,
     booking_id        VARCHAR(20) NOT NULL,
     transaction_type  VARCHAR(10) NOT NULL CHECK (transaction_type IN ('NR', 'Metro')),
-    user_id           VARCHAR(10) REFERENCES users(user_id),
+    user_id           VARCHAR(10) REFERENCES users(user_id) ON DELETE RESTRICT,
     rating            INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
     comment           TEXT,
     submitted_at      TIMESTAMPTZ,
